@@ -40,7 +40,7 @@ class Order:
         return self.lesson_place == 4
 
     @classmethod
-    def from_api(cls, d: dict) -> "Order":
+    def from_api(cls, d: dict) -> Order:
         def _names(v):
             if not isinstance(v, list):
                 return []
