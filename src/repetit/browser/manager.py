@@ -21,6 +21,7 @@ log = logging.getLogger("repetit.browser")
 READY = "READY"
 BROWSER_OFFLINE = "BROWSER_OFFLINE"
 AUTH_REQUIRED = "AUTH_REQUIRED"
+_WORKER_FEED_FRAGMENT = "repetit-worker"
 
 
 def _host_ok(hostname: str | None) -> bool:
@@ -30,12 +31,25 @@ def _host_ok(hostname: str | None) -> bool:
 
 
 def is_feed_url(url: str) -> bool:
-    """Строго лента /lk/teacher/neworders, query допустим."""
+    """Строго лента /lk/teacher/neworders, query/fragment допустимы."""
     try:
         p = urlparse(url)
     except Exception:
         return False
     return _host_ok(p.hostname) and p.path.rstrip("/") == "/lk/teacher/neworders"
+
+
+def _is_worker_feed_url(url: str) -> bool:
+    """Лента, явно помеченная как принадлежащая воркеру.
+
+    Fragment не уходит на сервер и не меняет API-запросы страницы, зато после
+    CDP reconnect позволяет не подхватить обычную вкладку владельца.
+    """
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    return is_feed_url(url) and p.fragment == _WORKER_FEED_FRAGMENT
 
 
 def is_login_url(url: str) -> bool:
@@ -78,6 +92,8 @@ class BrowserManager:
         ctx = self._default_context()
         page = self._find_our_page(ctx)
         if page is None:
+            # Не переиспользуем обычную feed-вкладку: она может принадлежать
+            # владельцу. Воркер создаёт отдельную, помеченную fragment-маркером.
             page = ctx.new_page()
             self._goto_feed(page)
         self.page = page
@@ -170,7 +186,7 @@ class BrowserManager:
     def _find_our_page(self, ctx: BrowserContext) -> Page | None:
         for page in ctx.pages:
             try:
-                if is_feed_url(page.url):
+                if _is_worker_feed_url(page.url):
                     return page
             except Exception:
                 continue
@@ -179,7 +195,11 @@ class BrowserManager:
     @staticmethod
     def _goto_feed(page: Page) -> None:
         try:
-            page.goto(config.FEED_URL, wait_until="domcontentloaded", timeout=45_000)
+            page.goto(
+                f"{config.FEED_URL}#{_WORKER_FEED_FRAGMENT}",
+                wait_until="domcontentloaded",
+                timeout=45_000,
+            )
         except Exception as e:
             log.warning("goto feed failed: %s", e)
 
@@ -242,8 +262,8 @@ class BrowserManager:
             return self.check_session()
 
         # Вкладка могла уйти на home/about:blank/error после ручного действия или
-        # неудачного goto. Ищем уже существующую ленту, иначе возвращаем нашу
-        # рабочую вкладку на FEED_URL. Не считать любой URL состоянием READY.
+        # неудачного goto. Ищем только вкладку с worker-маркером; обычную ленту
+        # владельца не подхватываем и не перезагружаем.
         if not is_feed_url(current_url):
             try:
                 ctx = self._default_context()
