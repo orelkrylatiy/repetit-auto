@@ -72,7 +72,7 @@ class FeedCapture:
             try:
                 if not (_is_search_orders(resp) or _is_orders_batch(resp)):
                     return
-                if resp.status in (401, 403, 429):
+                if resp.status in (401, 403, 429) or resp.status >= 500:
                     bad_status.append(resp.status)
                     return
                 if resp.status != 200:
@@ -100,33 +100,58 @@ class FeedCapture:
             except Exception:
                 pass
 
-        # анти-долбление: 401/403 = сессия/антибот, 429 = лимит площадки
+        # Анти-долбление: 401/403 = сессия/антибот, 429 = лимит площадки,
+        # 5xx = площадка нестабильна. Во всех случаях не продолжаем угадывать.
         if 401 in bad_status or 403 in bad_status:
             raise FeedAuthError(f"лента ответила {bad_status} — стоп-пауза")
         if 429 in bad_status:
             _set_cooldown(config.FEED_COOLDOWN_FILE, 30 * 60)
             raise FeedError("лента ответила 429 — cooldown 30 мин")
+        if any(s >= 500 for s in bad_status):
+            _set_cooldown(config.FEED_COOLDOWN_FILE, 10 * 60)
+            raise FeedError(f"лента ответила {bad_status} — cooldown 10 мин")
 
         if not ids_resp:
             raise FeedError(
                 f"searchOrders не пойман за {config.CAPTURE_WINDOW_S} с "
                 f"(url: {self.page.url})"
             )
-        # несколько РАЗНЫХ ответов searchOrders за окно — фиксируем в лог
-        uniq = {json.dumps(x, ensure_ascii=False) for x in ids_resp}
-        if len(uniq) > 1:
-            log.warning("FEED_AMBIGUOUS: %d разных searchOrders, беру последний", len(uniq))
-        all_ids = ids_resp[-1]
-        if not isinstance(all_ids, list):
-            raise FeedError(f"searchOrders вернул не список: {type(all_ids)}")
 
-        batch = batch_resp[-1] if batch_resp else []
-        if not isinstance(batch, list):
-            batch = []
+        # Несколько РАЗНЫХ searchOrders в одном capture-окне — не выбираем
+        # произвольно «последний». SPEC требует fail-closed + диагностику.
+        uniq = {json.dumps(x, ensure_ascii=False, sort_keys=True) for x in ids_resp}
+        if len(uniq) > 1:
+            self.last_diag = {
+                "error": "FEED_AMBIGUOUS",
+                "variants": len(uniq),
+                "url": self.page.url,
+            }
+            log.warning("FEED_AMBIGUOUS: %d разных searchOrders — цикл пропущен", len(uniq))
+            raise FeedError(f"FEED_AMBIGUOUS: {len(uniq)} разных searchOrders")
+
+        raw_ids = ids_resp[-1]
+        if not isinstance(raw_ids, list):
+            raise FeedError(f"searchOrders вернул не список: {type(raw_ids)}")
+        try:
+            all_ids = [int(i) for i in raw_ids]
+        except (TypeError, ValueError) as e:
+            raise FeedError(f"searchOrders содержит нечисловой id: {e}") from e
+
+        # Пустая лента — нормальный исход. Для непустой ленты отсутствие батча
+        # деталей означает неполный capture, кандидатов по нему не обрабатываем.
+        if all_ids and not batch_resp:
+            raise FeedError("searchOrders пойман, но батч /orders?ids= не пойман")
+
         details: dict[int, dict] = {}
-        for item in batch:
-            if isinstance(item, dict) and item.get("id"):
-                details[int(item["id"])] = item
+        for batch in batch_resp:
+            if not isinstance(batch, list):
+                continue
+            for item in batch:
+                if isinstance(item, dict) and item.get("id"):
+                    try:
+                        details[int(item["id"])] = item
+                    except (TypeError, ValueError):
+                        continue
 
         orders = [Order.from_api(details[i]) for i in all_ids if i in details]
         self.last_diag = {
@@ -136,4 +161,4 @@ class FeedCapture:
             "url": self.page.url,
         }
         log.info("capture: %s", self.last_diag)
-        return orders, [int(i) for i in all_ids]
+        return orders, all_ids
