@@ -44,7 +44,8 @@ CDP :9335). Нет сессии → AUTH_REQUIRED, ждёт ручного ло�
   `LLM_MODEL=GLM-5.3-Flash` (обычный paas-эндпоинт отдаёт 1113 «no balance» —
   flash живёт на coding-тарифе)
 - `REPETIT_DAILY_SEND_LIMIT` (дефолт 3), `REPETIT_MAX_PER_CYCLE` (3),
-  `REPETIT_WORK_HOURS` (0,24), `REPETIT_CDP_PORT` (9335)
+  `REPETIT_WORK_HOURS` (дефолт 8,23; `0,24` = круглосуточно),
+  `REPETIT_CDP_PORT` (9335)
 
 ## Структура
 
@@ -62,7 +63,13 @@ logs/worker.log        — основной лог; logs/respond/*.png — ск�
 
 лента neworders (reload + перехват `searchOrders` + `orders?ids=`) →
 новые ID → фильтры → LLM → `chatforteacher?orderId=…` → ввод в
-`message-composer-input` → Send → подтверждение по DOM (текст в чате).
+`message-composer-input` → Send → подтверждение по DOM (текст в чате +
+очистившийся composer).
+
+Перед первым сообщением воркер обязан пассивно получить
+`GET /api/teacher/chats/order?orderId=...`: если история уже есть, повторное
+первое сообщение запрещено. Если состояние чата не удалось подтвердить, Send
+не выполняется, draft остаётся pending для следующей попытки.
 
 ## Известные грабли
 
@@ -71,7 +78,11 @@ logs/worker.log        — основной лог; logs/respond/*.png — ск�
 - Открытие карточки заявки ставит серверный `viewed` — триаж только по
   батчу ленты.
 - `uv pip install -e .` требует сети; offline: `PYTHONPATH=src .venv/bin/python -m repetit …`.
-- Дневной лимит считается по `sent_at >= полуночи` (sent+already).
+- Дневной лимит считается по `sent_at >= полуночи`: `sent + unknown`.
+  `unknown` — Send был, но подтверждение не получено, поэтому fail-closed
+  считаем возможной отправкой; `already` лимит не расходует.
+- `run` и `once` используют общий `data/worker.lock`: параллельные режимы,
+  способные отправлять сообщения, запрещены.
 
 ## Бэклог
 
