@@ -67,8 +67,8 @@ def main() -> int:
         by_path[f"{e['method']} {p.path}"] += 1
 
     print("=== ССЫЛКИ /lk ===")
-    for l in links:
-        print(f"  {l['text']!r:40} -> {l['href']}")
+    for link in links:
+        print(f"  {link['text']!r:40} -> {link['href']}")
     print("\n=== КНОПКИ (первые 40) ===")
     for b in btns[:40]:
         print(f"  {b['text']!r}")
