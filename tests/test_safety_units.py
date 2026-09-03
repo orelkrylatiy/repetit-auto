@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from repetit.browser.manager import is_feed_url, is_login_url
+from repetit.browser.manager import _is_worker_feed_url, is_feed_url, is_login_url
 from repetit.integration.respond import _chat_has_history
 from repetit.integration.triage import _RULES, _style_variation
 from repetit.utils import textguard
@@ -14,6 +14,12 @@ def test_feed_url_is_strict_but_allows_query_and_trailing_slash():
     assert is_feed_url("https://repetit.ru/lk/teacher/neworders/?x=1")
     assert not is_feed_url("https://repetit.ru/lk/teacher/neworders/123")
     assert not is_feed_url("https://evil.example/lk/teacher/neworders")
+
+
+def test_worker_feed_marker_does_not_claim_manual_feed_tab():
+    assert not _is_worker_feed_url("https://repetit.ru/lk/teacher/neworders")
+    assert _is_worker_feed_url("https://repetit.ru/lk/teacher/neworders#repetit-worker")
+    assert not _is_worker_feed_url("https://evil.example/lk/teacher/neworders#repetit-worker")
 
 
 def test_login_url_requires_repetit_host():
