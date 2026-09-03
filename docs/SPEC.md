@@ -152,13 +152,13 @@ Chrome владельца (профиль data/chrome-profiles/main, CDP 127.0.0
   → SQLite (send_status, sent_at) → скриншоты + журнал отправок
 ```
 
-Модули скелета: `config.py` (все настройки), `main.py` (цикл + CLI),
-`browser/manager.py` (CDP, вкладка ленты, состояния), `integration/feed.py`
-(захват ленты), `integration/orders.py` (нормализация деталей),
+Модули скелета (реализация): `config.py` (все настройки), `main.py` (цикл +
+CLI), `browser/manager.py` (CDP, вкладка ленты, состояния), `integration/
+feed.py` (зават ленты), `integration/triage.py` (LLM-вердикт + текст),
 `integration/respond.py` (chatforteacher: ввод + Send), `filters.py`
 (hard-фильтры), `llm/client.py` (glm/openai/anthropic, ключи в .env),
-`storage/store.py` (SQLite), `models/` (OrderSnippet, FeedSnapshot,
-FilterVerdict), `utils/` (pacing, textguard, workhours).
+`storage/store.py` (SQLite), `models/order.py` (Order), `models/verdict.py`
+(FilterVerdict), `utils/` (pacing, textguard, workhours).
 
 Так как отправка происходит в самом цикле воркера (единственный процесс),
 сериализация «воркер ↔ автопилот» из profi не нужна; лок-файл процесса
@@ -241,30 +241,34 @@ MVP работает с первым батчами (~21 заявок): новы
 | `subjectDivisions[]`, `subjectAdditions[]` | ОГЭ, python… | слепок LLM |
 | `minPrice` / `maxPrice` | int ₽ | бюджет-гейт §12.2 + слепок LLM |
 | `lessonDuration`, `plannedLessonNumber` | мин / шт | слепок LLM |
-| `lessonPlace` (int) + флаги `lessonPlaceRemote/Pupil/Teacher` | bool | фильтр дистанционки §9 |
+| `lessonPlace` (int) + флаги `lessonPlaceRemote/Pupil/Teacher` | int-enum; **4 = «онлайн»**; булевы флаги у онлайн-заявок бывают все False — доверять int-значению (живой факт E2E, RECON §3) | фильтр дистанционки §9 |
 | `area`, `homeMetroName`, `clientAddressStr` | str | слепок LLM (контекст гео) |
 
 Важно: `viewed` меняется только при открытии карточки (`neworders/{id}`);
 загрузка ленты и батча viewed не трогает (RECON §3). Поэтому основной путь
 деталей — пассивный батч, карточку не открываем.
 
-### 8.2. Нормализация (models/)
+### 8.2. Нормализация (models/order.py — реализация)
 
-`OrderSnippet` (маппинг полей API → модель):
+`Order.from_api(dict)` — батч-элемент / `result` одной заявки:
 
 | Поле модели | Источник |
 |---|---|
-| `id` | `id` (str) |
-| `title` | `subject.name` + `subjectAdditions[]` (напр. «Информатика, ОГЭ») |
-| `description` | `purpose` + `\n` + `information` |
-| `price_raw` | «{minPrice}–{maxPrice} ₽» |
-| `last_update` | ts из `orderDate` |
-| `geo_remote` | флаг `lessonPlaceRemote` (True/False/None — нет данных) |
-| `client_name` | `contactName` |
-| `raw` | исходный `result` целиком (→ `candidates.snippet_json`) |
+| `id` | `id` (int) |
+| `subject`, `subject_id` | `subject.name`, `subject.id` |
+| `purpose`, `information` | как есть |
+| `min_price` / `max_price` | `minPrice` / `maxPrice` |
+| `contact_name` | `contactName` |
+| `city`, `metro` | `area.cityName`, `homeMetroName` |
+| `lesson_place` | `lessonPlace` (int; `is_remote` = `== 4`, см. §8.1) |
+| `pupil_category` | `pupilCategory.name` |
+| `order_date` | `orderDate` ISO |
+| `additions` / `divisions` | `subjectAdditions[].name` / `subjectDivisions[].name` |
+| `title` | subject + additions/divisions (для лога/БД) |
+| `raw` | исходный элемент целиком |
+| `triage_dict()` | компактная проекция для LLM (без raw-мусора) |
 
-`FeedSnapshot`: `ids: list[str]`, `details: dict[str, dict]`,
-`captured_at`, `raw`. `FilterVerdict`: `passed: bool`, `reason: str` (для лога).
+`FilterVerdict`: `passed: bool`, `reason: str` (для лога).
 
 ### 8.3. Детали кандидата
 
@@ -277,25 +281,26 @@ MVP работает с первым батчами (~21 заявок): новы
 
 ### 8.4. Дедуп и хранилище (storage/store.py, SQLite `data/repetit.db`)
 
-- `feed_seen(order_id PK, last_update, first_seen_at, last_seen_at)` —
-  дедуп ленты; `register_feed_seen()` → NEW / UPDATED / UNCHANGED.
-- `candidates(order_id PK, first_seen_at, updated_at, source_last_update,
-  title, snippet_json, triage_reason, priority, details_status,
-  details_json, details_loaded_at, draft_status, draft_text,
-  draft_generated_at, send_status, sent_at, last_error)` — lifecycle заявки
-  и одновременно журнал откликов; вьюха `v_responses` — плоская статистика
-  для CLI `stats`. Колонки `respond_mode`/`paid_rub` из слепка скелета в MVP
-  не заполняются (отклик бесплатен; платное действие — обмен контактами —
-  не автоматизируется).
-- `chat_log` — для Контура Б (схема есть, воркер не пишет).
-- Статусы: `details_status` pending/ready/error; `draft_status`
-  pending/generating/generated/error; `send_status`
-  not_sent/sent/unknown/fail/skipped. `sent` и `unknown` считаются
-  отправленными (расход дневного лимита, §12.1).
-- Дедуп отправки — двойной: (а) SQLite `send_status != not_sent` → не
-  отправляем; (б) перед вводом текста — если в чате уже есть история
-  сообщений (DOM), помечаем responded и уходим без отправки (защита от
-  дубля первого сообщения при потере БД).
+Реализация MVP (проще исходного наброска profi-стиля, функционально
+эквивалентна — lifecycle в одной таблице):
+
+- `feed_seen(order_id PK, first_seen_at, last_seen_at)` — массовая
+  регистрация ID ленты (`register_seen_many`, executemany); в решениях
+  не участвует (дедуп — по `responses`), только статистика/аудит.
+- `responses(order_id PK, subject, title, decision, reason, text, status,
+  error, screenshot, created_at, sent_at)` — вердикты и отправки.
+  `decision`: respond / skip / filtered / error; `status`: not_sent /
+  sent / already / unknown / error. `sent` и `unknown` считаются
+  отправленными (расход дневного лимита §12.1); `already` — чат уже был,
+  не расход.
+- Pending-семантика: строка с `decision=respond AND status=not_sent` —
+  кандидат ждёт отправки (текст переиспользуется без повторного LLM-вызова);
+  все остальные строки терминальны.
+- Дедуп отправки — двойной: (а) SQLite pending-семантика выше; (б) перед
+  вводом текста — пассивный перехват `GET /api/teacher/chats/order?orderId=`
+  (RECON §6): `result.messages` непустой или есть `lastMessage` → `already`,
+  без ввода (защита от дубля первого сообщения при потере БД/ручном ответе).
+- `chat_log` из слепка скелета удалён — для Контура Б (§18).
 
 ## 9. Hard-фильтры (filters.py, до LLM)
 
@@ -317,19 +322,22 @@ MVP работает с первым батчами (~21 заявок): новы
 
 ## 10. LLM-триаж (llm/client.py, glm-5.3-flash)
 
-Провайдер GLM (z.ai, OpenAI-протокол): `ZAI_API_KEY`, `GLM_BASE_URL`
-(дефолт `https://api.z.ai/api/paas/v4`), `LLM_MODEL=glm-5.3-flash`.
-Мульти-провайдерный слой скелета (glm/openai/anthropic) сохраняется;
-`LLM_FALLBACK_MODEL` — цепочка фолбэков. Проверка связи — `llm-check`.
+Провайдер GLM (z.ai, OpenAI-протокол): `ZAI_API_KEY`, `GLM_BASE_URL`,
+`LLM_MODEL`. **Живой факт 2026-09-03**: обычный paas-эндпоинт
+`https://api.z.ai/api/paas/v4` для этого ключа отвечает 1113 «Insufficient
+balance»; рабочий — **coding-эндпоинт** `https://api.z.ai/api/coding/paas/v4`,
+модель `GLM-5.3-Flash` (регистр имени важен — как в .env). Мульти-провайдерный
+слой скелета (glm/openai/anthropic) сохраняется; `LLM_FALLBACK_MODEL` —
+цепочка фолбэков. Проверка связи — `llm-check`.
 
 Вход: системный промпт = персона (`personas/<PERSONA>.md`, дефолт
-`personas/info.md` — репетитор информатики) + правила ниже; user-промпт —
-компактный JSON-слепок карточки (только поля триажа: id, subject+additions,
-purpose, information (≤4000 симв.), pupilCategory, contactName,
-minPrice/maxPrice, lessonDuration, plannedLessonNumber, место (флаги
-remote/pupil/teacher), area, orderDate) + подсказка адресата «КОМУ ПИШЕМ»
-(по contactName vs pupilCategory — обычно заявки подаёт родитель, обращаемся
-к нему; неясно — нейтрально, не угадываем).
+`personas/maxim.md` — репетитор информатики/программирования, только
+правдивые факты) + правила ниже; user-промпт — JSON `Order.triage_dict()`
+(id, subject, goal=purpose, client_text=information (полный), цены,
+contactName, city/metro, online, pupilCategory, additions/divisions)
++ подсказка адресата «КОМУ ПИШЕМ» (по contactName vs pupilCategory —
+обычно заявки подаёт родитель, обращаемся к нему; неясно — нейтрально,
+не угадываем).
 
 Правила триажа (в системном промпте, по образцу profi):
 - цель отклика — договориться на пробное занятие; текст завершается
@@ -364,13 +372,14 @@ max_tokens → `draft_status=error` (нет вечного ретрая).
 3. Ждём композер `[data-testid="message-composer-input"]` (таймаут ~15 с).
    Не появился / редирект на loginwithshortcode → AUTH_REQUIRED, отправки
    цикла прекращаются.
-4. **Подстраховка дубля**: если на странице уже есть история сообщений чата
-   (кроме пустого состояния) — заявке `send_status=skipped`, note «чат уже
-   существует», вкладку закрыть, текст не вводить.
+4. **Подстраховка дубля**: пассивно ловим `GET /api/teacher/chats/order?
+   orderId={id}` (сам сайт его шлёт при открытии чата) — если `result.messages`
+   непустой или есть `lastMessage`, чат уже существует → статус `already`,
+   текст не вводить, вкладку закрыть.
 5. Скриншот «до» не нужен; ввод: клик по композеру → посимвольный тайп
    чанками 3–9 символов, задержки 45–110 мс внутри чанка, паузы 0.15–0.6 с
    между чанками (`utils/pacing.type_human`). Сверить значение поля == текст.
-6. Скриншот `logs/respond/{order_id}_{HHMMSS}_filled.png`.
+6. Скриншот `logs/respond/{order_id}_filled_{ts}.png`.
 7. Клик `[data-testid="message-composer-send-button"]` (настоящий CDP-клик).
 8. **Подтверждение отправки по DOM** (транспорт WS, XHR-сигнала успеха нет):
    в течение ~10 с сообщение с нашим текстом появилось в чате и композер
@@ -447,16 +456,14 @@ max_tokens → `draft_status=error` (нет вечного ретрая).
 | Артефакт | Что |
 |---|---|
 | `logs/worker.log` | весь цикл: состояния, итоги захвата (ids/батч), вердикты фильтров PASS/SKIP с причинами, триаж, отправки, ошибки. Формат: `ts LEVEL name: сообщение` |
-| `logs/sends.log` | журнал отправок: одна строка на отправку — `дата-время #id send=ok|fail|unknown: причина \| N симв \| модель \| бюджет` (в скелете эту роль играет AUTOPILOT_LOG) |
-| `logs/respond/{order_id}_{HHMMSS}_filled.png` | композер с введённым текстом, до Send |
-| `logs/respond/{order_id}_{HHMMSS}_after.png` | чат после Send (подтверждение доставки) |
-| `logs/respond/{order_id}_{HHMMSS}_outcome.json` | вердикт LLM, длина текста, модель, исход, url вкладки |
-| `logs/feed_diag/*.json` | дампы неудачных захватов ленты (FEED_CAPTURE_ERROR/AMBIGUOUS) |
-| `data/repetit.db` | SQLite: feed_seen, candidates, v_responses (§8.4) |
+| `logs/respond/{order_id}_filled_{ts}.png` | композер с введённым текстом, до Send |
+| `logs/respond/{order_id}_after_{ts}.png` | чат после Send (подтверждение доставки) |
+| `data/repetit.db` | SQLite: feed_seen, responses (§8.4) — полный аудит вердиктов/текстов/статусов |
 
-CLI `stats` — таблица по `v_responses` (статусы, длины, времена) и итог
-«отправлено N». CLI `candidates` — очередь с lifecycle-статусами. Ничто не
-логируется молча: любой skip/error имеет причину в БД или логе.
+`sends.log`/`_outcome.json` из наброска в MVP не реализованы — их роль
+закрывают `responses` в БД (текст, статус, screenshot, sent_at) и worker.log;
+отдельная цепочка аудита — бэклог. CLI `status` заменяет набросочный `stats`
+(сводка: seen/sent/by_decision + последние строки).
 
 ## 15. Конфигурация и запуск
 
@@ -464,8 +471,9 @@ CLI `stats` — таблица по `v_responses` (статусы, длины, �
 
 ```
 ZAI_API_KEY=...            # ключ z.ai (провайдер glm)
-LLM_MODEL=glm-5.3-flash    # модель триажа
-# GLM_BASE_URL=https://api.z.ai/api/paas/v4   # опционально
+GLM_BASE_URL=https://api.z.ai/api/coding/paas/v4   # coding-эндпоинт (paas даёт 1113)
+LLM_MODEL=GLM-5.3-Flash    # модель триажа (регистр важен)
+REPETIT_WORK_HOURS=0,24    # окно активности владельца (дефолт кода — 8,23)
 # LLM_FALLBACK_MODEL=...   # опционально, цепочка фолбэков
 ```
 
@@ -475,15 +483,16 @@ LLM_MODEL=glm-5.3-flash    # модель триажа
 |---|---|---|
 | `REPETIT_CDP_PORT` | `9335` | CDP-порт Chrome |
 | `REPETIT_CHROME_PROFILE` | `data/chrome-profiles/main` | user-data-dir (относительный — от корня проекта) |
-| `REPETIT_CHROME_NO_LAUNCH` | `1` | Chrome не поднимаем сами: нет CDP → BROWSER_OFFLINE и ждём владельца |
+| `REPETIT_CHROME_NO_LAUNCH` | `0` | 0 = нет CDP → сами поднимаем Chrome с нашим профилем (turnkey); 1 = ждём владельца |
 | `REPETIT_CHROME_PATH` | системный Chrome (mac-путь) | бинарь для режима с авто-запуском |
 | `REPETIT_DB` | `data/repetit.db` | SQLite |
-| `REPETIT_PERSONA` | `info` | `personas/info.md` |
+| `REPETIT_PERSONA` | `maxim` | `personas/maxim.md` |
 | `REPETIT_SUBJECTS` | `информатик,программирован` | страховка предмета (§9.1) |
 | `REPETIT_DAILY_SEND_LIMIT` | `3` | дневной лимит отправок (0 = без лимита) |
-| `REPETIT_MIN_CLIENT_PRICE` | `0` | бюджет-гейт по maxPrice (0 = выключен) |
+| `REPETIT_MIN_CLIENT_RATE` | `0` | бюджет-гейт по maxPrice ₽/60мин (0 = выключен); алиас `REPETIT_MIN_CLIENT_PRICE` тоже принимается |
+| `REPETIT_MAX_PER_CYCLE` | `3` | максимум отправок за один цикл |
 | `REPETIT_WORK_HOURS` | `8,23` | окно активности («0,24» = круглосуточно) |
-| `REPETIT_RELOAD_MIN` / `_MAX` | `90` / `120` | интервал цикла, с |
+| `REPETIT_CYCLE_MIN` / `_MAX` | `90` / `120` | интервал цикла, с |
 
 ### 15.3. Порядок запуска (Chrome — внешний, сессия живёт в профиле)
 
@@ -507,18 +516,18 @@ uv run python -m repetit --once           # один цикл для прове�
 uv run python -m repetit                  # рабочий луп 90–120 с
 ```
 
-### 15.4. CLI (полный список)
+### 15.4. CLI (реализовано в MVP)
 
 ```
-python -m repetit --once | --cycles N     # цикл(ы) воркера
-python -m repetit llm-check [--model M]   # живая проверка LLM
-python -m repetit candidates              # очередь кандидатов
-python -m repetit stats                   # статистика откликов (v_responses)
-python -m repetit sent <id> | skip <id>   # ручные гейты
-python -m repetit note <id> --text '...'  # заметка
-python -m repetit fetch-details <id>      # дозагрузка деталей заявки
-python -m repetit respond <id> --text '...' [--send]  # ручная отправка
+python -m repetit run [--dry-run]   # рабочий луп 90–120 с (--dry-run — без отправок)
+python -m repetit once [--dry-run]  # один цикл (exit 1 при BROWSER_OFFLINE)
+python -m repetit llm-check         # живая проверка LLM
+python -m repetit status            # сводка по БД + последние отклики
 ```
+
+Ручной `respond <id> --send` из profi-набора в MVP не переносился
+(автономный цикл отправляет сам через гейты §12; ручная отправка —
+в браузере владельца). В бэклоге §18.
 
 ## 16. Приёмочные тесты MVP
 

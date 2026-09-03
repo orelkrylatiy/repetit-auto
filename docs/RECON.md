@@ -50,6 +50,9 @@
 - `area` (город/регион), `homeMetroName`, `clientAddressStr`
 - `status`/`statusObject` (1 = «Не обработана»), `viewed` (bool!)
 - `orderDate` ISO, `id`
+- `lessonPlace` — int-enum: **4 = «онлайн»** (живой факт E2E: у онлайн-заявки
+  lessonPlace=4, при этом булевы `lessonPlaceRemote/Pupil/Teacher` все False —
+  флагам доверять нельзя, только int-значению; см. models/order.py `is_remote`)
 
 **`viewed: true` ставится сервером при открытии карточки** (аналог
 UpdateOrderViewingEvent в profi). Загрузка ленты/батча viewed не меняла.
