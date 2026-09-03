@@ -1,5 +1,6 @@
-"""profi — воркер откликов Профи.ру (Контур A + чаты Контур B light).
+"""repetit — воркер откликов Репетитор.ру (Контур A).
 
-Слои: browser (Chrome/CDP) → integration (Профи.ру) → storage (SQLite);
-llm (провайдеры), models (данные), utils (общие помощники), main (CLI/оркестрация).
+Слои: browser (Chrome/CDP) → integration (repetit.ru: лента/триаж/отклик) →
+storage (SQLite); llm (провайдеры), models (данные), utils (помощники),
+main (CLI/оркестрация).
 """
