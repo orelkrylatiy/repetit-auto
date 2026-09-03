@@ -88,7 +88,11 @@ def _close_stray_tabs(mgr: bm.BrowserManager) -> None:
             if p is mgr.page:
                 continue
             url = p.url
-            if "chatforteacher" in url or re.search(r"neworders/\d+", url):
+            # только СВОИ следы: чат по заявке (?orderId=) и карточки заявок.
+            # chatforteacher?chatId= может быть открыт владельцем вручную — не трогаем
+            if ("chatforteacher" in url and "orderid=" in url.lower()) or re.search(
+                r"neworders/\d+", url
+            ):
                 p.close(run_before_unload=False)
                 log.info("гигиена: закрыта висящая вкладка %s", url[:80])
         except Exception:
@@ -172,9 +176,9 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
                 continue
             if tri["decision"] == "llm_error":
                 # сеть/лимит провайдера: кандидат НЕ терминальный, но LLM дальше
-                # в этом цикле не дёргаем — cooldown 15 мин
+                # в этом цикле не дёргаем — cooldown 30 мин (SPEC §10)
                 log.warning("заявка %s: LLM сбой — %s", order.id, tri["reason"])
-                _set_cooldown(config.LLM_COOLDOWN_FILE, 15 * 60)
+                _set_cooldown(config.LLM_COOLDOWN_FILE, 30 * 60)
                 summary["errors"] += 1
                 break
             if tri["decision"] == "error":
