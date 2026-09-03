@@ -67,10 +67,18 @@ class Responder:
 
             def on_chat_api(resp) -> None:
                 try:
-                    if _CHATS_ORDER_PATH in resp.url and resp.request.method == "GET":
-                        chat_state["payload"] = resp.json()
-                except Exception:
-                    pass
+                    if _CHATS_ORDER_PATH not in resp.url or resp.request.method != "GET":
+                        return
+                    if resp.status != 200:
+                        chat_state["error"] = f"HTTP {resp.status}"
+                        return
+                    payload = resp.json()
+                    if not isinstance(payload, dict):
+                        chat_state["error"] = f"невалидный payload: {type(payload).__name__}"
+                        return
+                    chat_state["payload"] = payload
+                except Exception as e:
+                    chat_state["error"] = f"не удалось прочитать chat-state: {type(e).__name__}: {e}"
 
             url = config.chat_url(order_id, chat_title)
             page.on("response", on_chat_api)
@@ -87,11 +95,13 @@ class Responder:
                     raise RespondAuthError("вылогинен при ожидании композера") from e
                 raise RespondError(f"композер не появился: {e}") from e
 
-            # Явно ждём именно ответ проверки существующего чата. Composer сам
-            # по себе не доказывает, что история уже загружена.
+            # Явно ждём именно успешный ответ проверки существующего чата.
+            # Composer сам по себе не доказывает, что история уже загружена.
             deadline = time.monotonic() + _CHAT_STATE_WAIT_S
-            while "payload" not in chat_state and time.monotonic() < deadline:
+            while not ({"payload", "error"} & chat_state.keys()) and time.monotonic() < deadline:
                 page.wait_for_timeout(100)
+            if "error" in chat_state:
+                raise RespondError(f"состояние чата не подтверждено: {chat_state['error']}")
             if "payload" not in chat_state:
                 raise RespondError("не пойман /api/teacher/chats/order — состояние чата не подтверждено")
 
