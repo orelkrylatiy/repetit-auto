@@ -5,11 +5,11 @@ delay, клики по элементам. Никаких page.evaluate-дейс
 через WS площадки — воркеру транспорт безразличен, успех подтверждаем по DOM.
 
 Статусы:
-  sent    — текст появился в чате (подтверждено)
-  already — чат уже существует с историей / наш текст уже там (НЕ расход лимита)
-  unknown — клик Send был, подтверждения за окно нет — ВОЗМОЖНАЯ отправка,
-            расходует дневной лимит (fail-closed)
-  error   — до Send не дошло (нет композера/логин-стена/не наш текст в поле)
+  sent          — текст появился в чате И композер очистился
+  already       — чат уже существует с историей / наш текст уже там
+  unknown       — клик Send был, подтверждения за окно нет; повтор запрещён
+  auth_required — чат ушёл на логин; цикл должен остановить отправки
+  retry         — до Send не дошло из-за временного/неясного состояния UI
 
 «Обменяться контактами» (платная квота) — НЕ трогаем никогда.
 """
@@ -29,9 +29,14 @@ log = logging.getLogger("repetit.respond")
 _COMPOSER = '[data-testid="message-composer-input"]'
 _SEND_BTN = '[data-testid="message-composer-send-button"]'
 _CHATS_ORDER_PATH = "/api/teacher/chats/order"
+_CHAT_STATE_WAIT_S = 5.0
 
 
 class RespondError(Exception):
+    pass
+
+
+class RespondAuthError(RespondError):
     pass
 
 
@@ -55,8 +60,9 @@ class Responder:
         page: Page = self.ctx.new_page()
         shot = None
         try:
-            # Пассивно слушаем чат-API ДО перехода: существующая история =
-            # повторное «первое сообщение» запрещено (дубль при потере БД)
+            # Пассивно слушаем чат-API ДО перехода. Нельзя отправлять первое
+            # сообщение, пока не убедились, что истории действительно нет:
+            # иначе потеря локальной БД может дать дубль.
             chat_state: dict = {}
 
             def on_chat_api(resp) -> None:
@@ -72,21 +78,31 @@ class Responder:
             human_pause(1.2, 2.5)
 
             if config.LOGIN_PATH in (page.url or ""):
-                raise RespondError("вылогинен при открытии чата")
+                raise RespondAuthError("вылогинен при открытии чата")
 
             try:
                 page.wait_for_selector(_COMPOSER, timeout=15_000)
             except Exception as e:
+                if config.LOGIN_PATH in (page.url or ""):
+                    raise RespondAuthError("вылогинен при ожидании композера") from e
                 raise RespondError(f"композер не появился: {e}") from e
 
-            if _chat_has_history(chat_state.get("payload")):
+            # Явно ждём именно ответ проверки существующего чата. Composer сам
+            # по себе не доказывает, что история уже загружена.
+            deadline = time.monotonic() + _CHAT_STATE_WAIT_S
+            while "payload" not in chat_state and time.monotonic() < deadline:
+                page.wait_for_timeout(100)
+            if "payload" not in chat_state:
+                raise RespondError("не пойман /api/teacher/chats/order — состояние чата не подтверждено")
+
+            if _chat_has_history(chat_state["payload"]):
                 return {
                     "status": "already",
                     "detail": "чат уже существует с историей — не дублируем",
                     "screenshot": self._screenshot(page, order_id, "already"),
                 }
 
-            body_before = page.evaluate("() => document.body.innerText")
+            body_before = page.locator("body").inner_text()
             if text[:80] in body_before:
                 return {
                     "status": "already",
@@ -101,20 +117,26 @@ class Responder:
             type_human(page, composer, text)
             human_pause(0.4, 0.9)
 
-            # финальная сверка поля: площадка могла порезать ввод (лимит поля
-            # неизвестен, RECON §10) — обрезанный текст не отправляем
+            # Финальная сверка поля: площадка могла порезать ввод. Обрезанный
+            # или изменённый текст не отправляем.
             value = (composer.input_value() or "").strip()
             if value != text.strip():
                 raise RespondError(f"в поле не наш текст: {value[:60]!r}")
             self._screenshot(page, order_id, "filled")
 
             send_btn.click()
-            # эффект: сообщение появилось в теле чата
+
+            # Успех подтверждаем двумя независимыми DOM-признаками из SPEC:
+            # сообщение появилось в чате И composer очистился. Иначе fail-closed.
             ok = False
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
-                body = page.evaluate("() => document.body.innerText")
-                if text[:80] in body:
+                body = page.locator("body").inner_text()
+                try:
+                    composer_empty = (composer.input_value() or "").strip() == ""
+                except Exception:
+                    composer_empty = False
+                if text[:80] in body and composer_empty:
                     ok = True
                     break
                 page.wait_for_timeout(500)
@@ -123,21 +145,28 @@ class Responder:
             if ok:
                 log.info("отклик отправлен: заявка %s", order_id)
                 return {"status": "sent", "detail": "ок", "screenshot": shot}
-            # Send был, подтверждения нет: считаем возможной отправкой (P0:
-            # unknown расходует дневной лимит, повторная попытка запрещена
-            # дедупом по БД)
-            log.warning("заявка %s: нет DOM-подтверждения после Send — unknown", order_id)
+
+            # Send был, подтверждения нет: считаем возможной отправкой. Повторная
+            # попытка запрещена, дневной лимит расходуется.
+            log.warning("заявка %s: нет полного DOM-подтверждения после Send — unknown", order_id)
             return {
                 "status": "unknown",
-                "detail": "текст не появился в чате за 15 с после Send",
+                "detail": "за 15 с не подтверждены одновременно сообщение и пустой composer",
                 "screenshot": shot,
             }
+        except RespondAuthError as e:
+            shot = shot or self._try_screenshot(page, order_id)
+            return {"status": "auth_required", "detail": str(e), "screenshot": shot}
         except RespondError as e:
             shot = shot or self._try_screenshot(page, order_id)
-            return {"status": "error", "detail": str(e), "screenshot": shot}
-        except Exception as e:  # браузерные сбои не должны ронять цикл
+            return {"status": "retry", "detail": str(e), "screenshot": shot}
+        except Exception as e:  # браузерные сбои не должны ронять процесс
             shot = shot or self._try_screenshot(page, order_id)
-            return {"status": "error", "detail": f"{type(e).__name__}: {e}", "screenshot": shot}
+            return {
+                "status": "retry",
+                "detail": f"{type(e).__name__}: {e}",
+                "screenshot": shot,
+            }
         finally:
             try:
                 page.close(run_before_unload=False)
