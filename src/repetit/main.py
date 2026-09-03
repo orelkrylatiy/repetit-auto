@@ -5,7 +5,7 @@
 сообщения в чат заявки (человеческий ввод) → аудит в SQLite + логи.
 
 Команды:
-  run        — цикл (дефолт); --dry-run — без отправок
+  run        — цикл; --dry-run — без отправок
   once       — один цикл; --dry-run — без отправок
   llm-check  — проверка LLM
   status     — сводка по БД
@@ -21,10 +21,10 @@ import time
 
 from repetit import config
 from repetit.browser import manager as bm
+from repetit.filters import hard_filter
 from repetit.integration.feed import FeedAuthError, FeedCapture, FeedError
 from repetit.integration.respond import Responder
 from repetit.integration.triage import triage
-from repetit.filters import hard_filter
 from repetit.storage.store import Store
 from repetit.utils.pacing import human_pause
 from repetit.utils.workhours import in_work_hours
@@ -65,6 +65,24 @@ def _set_cooldown(path, seconds: float) -> None:
         pass
 
 
+def _acquire_worker_lock():
+    """Singleton для ЛЮБОГО режима, который может отправлять сообщения.
+
+    И `run`, и `once` используют один Chrome/SQLite. Без общего lock ручной
+    `once` параллельно постоянному worker может отправить дубль.
+    """
+    import fcntl
+
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    lock_file = open(config.DATA_DIR / "worker.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return None
+    return lock_file
+
+
 def _gates_ok(store: Store) -> tuple[bool, str]:
     """Денежные/временные предохранители перед отправкой."""
     if not in_work_hours():
@@ -89,15 +107,14 @@ def _close_stray_tabs(mgr: bm.BrowserManager) -> None:
             if p is mgr.page:
                 continue
             url = p.url
-            # только СВОИ следы: чат по заявке (?orderId=) и карточки заявок.
-            # chatforteacher?chatId= может быть открыт владельцем вручную — не трогаем
+            # Только СВОИ следы: чат по заявке (?orderId=) и карточки заявок.
+            # chatforteacher?chatId= может быть открыт владельцем вручную — не трогаем.
             if ("chatforteacher" in url and "orderid=" in url.lower()) or re.search(
                 r"neworders/\d+", url
             ):
                 p.close(run_before_unload=False)
                 log.info("гигиена: закрыта висящая вкладка %s", url[:80])
             elif bm.is_feed_url(url):
-                # дубль ленты (утечка пробы/падения) — наша постоянная одна
                 p.close(run_before_unload=False)
                 log.info("гигиена: закрыт дубль ленты %s", url[:80])
         except Exception:
@@ -108,7 +125,7 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
     """Один цикл воркера. Возвращает сводку."""
     summary = {"new": 0, "responded": 0, "skipped": 0, "errors": 0}
 
-    # вне рабочих часов браузер не трогаем вообще (SPEC §6.2)
+    # Вне рабочих часов браузер не трогаем вообще (SPEC §6.2).
     if not in_work_hours():
         log.info("вне рабочих часов %s — спим", config.WORK_HOURS)
         return summary
@@ -140,31 +157,35 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
     store.register_seen_many(all_ids)
 
     for order in orders:
-        # гейты ДО триажа: лимит исчерпан — LLM-квоту не тратим (SPEC §12.1)
+        # Гейты ДО триажа: лимит исчерпан — LLM-квоту не тратим (SPEC §12.1).
         if config.DAILY_SEND_LIMIT and store.sends_today() >= config.DAILY_SEND_LIMIT:
             log.info("дневной лимит %s исчерпан — триаж не ведём", config.DAILY_SEND_LIMIT)
             break
 
         row = store.get_response(order.id)
-        # окончательно обработана? (skip/filtered/отправлена/ошибка)
-        if row is not None and not (
-            row["decision"] == "respond" and row["status"] == "not_sent"
-        ):
+        # Pending: новая строка, not_sent или legacy respond/error из старой
+        # версии (pre-Send browser/UI error ошибочно был терминальным).
+        pending = row is None or (
+            row["decision"] == "respond" and row["status"] in ("not_sent", "error")
+        )
+        if not pending:
             continue
-        # pending: записи нет (LLМ ещё не звали) или текст готов (dry-run/гейт)
         summary["new"] += 1
 
         if row is not None and row["text"]:
             tri = {"decision": "respond", "reason": row["reason"] or "", "text": row["text"]}
         elif _cooldown_active(config.LLM_COOLDOWN_FILE):
-            # LLM на паузе: этого кандидата триажим позже (не терминально)
             continue
         else:
             verdict = hard_filter(order)
             if not verdict.passed:
                 store.upsert_response(
-                    order.id, subject=order.subject, title=order.title,
-                    decision="filtered", reason=verdict.reason, status="not_sent",
+                    order.id,
+                    subject=order.subject,
+                    title=order.title,
+                    decision="filtered",
+                    reason=verdict.reason,
+                    status="not_sent",
                 )
                 log.info("заявка %s отфильтрована: %s", order.id, verdict.reason)
                 summary["skipped"] += 1
@@ -173,25 +194,31 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
             tri = triage(order)
             if tri["decision"] == "skip":
                 store.upsert_response(
-                    order.id, subject=order.subject, title=order.title,
-                    decision="skip", reason=tri["reason"], status="not_sent",
+                    order.id,
+                    subject=order.subject,
+                    title=order.title,
+                    decision="skip",
+                    reason=tri["reason"],
+                    status="not_sent",
                 )
                 log.info("заявка %s: LLM skip — %s", order.id, tri["reason"])
                 summary["skipped"] += 1
                 continue
             if tri["decision"] == "llm_error":
-                # сеть/лимит провайдера: кандидат НЕ терминальный, но LLM дальше
-                # в этом цикле не дёргаем — cooldown 30 мин (SPEC §10)
                 log.warning("заявка %s: LLM сбой — %s", order.id, tri["reason"])
                 _set_cooldown(config.LLM_COOLDOWN_FILE, 30 * 60)
                 summary["errors"] += 1
                 break
             if tri["decision"] == "error":
-                # детерминированный брак (длина/textguard/кривой JSON) —
-                # терминально, чтобы не крутить LLM вечно
+                # Детерминированный брак ответа LLM: терминально, чтобы не
+                # крутить тот же плохой результат бесконечно.
                 store.upsert_response(
-                    order.id, subject=order.subject, title=order.title,
-                    decision="error", reason=tri["reason"], status="not_sent",
+                    order.id,
+                    subject=order.subject,
+                    title=order.title,
+                    decision="error",
+                    reason=tri["reason"],
+                    status="not_sent",
                 )
                 log.warning("заявка %s: брак триажа (терминально) — %s", order.id, tri["reason"])
                 summary["errors"] += 1
@@ -200,9 +227,14 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
         gates, why = _gates_ok(store)
         if not gates:
             store.upsert_response(
-                order.id, subject=order.subject, title=order.title,
-                decision="respond", reason=tri["reason"], text=tri["text"],
-                status="not_sent", error=why,
+                order.id,
+                subject=order.subject,
+                title=order.title,
+                decision="respond",
+                reason=tri["reason"],
+                text=tri["text"],
+                status="not_sent",
+                error=why,
             )
             log.info("заявка %s: гейт — %s (текст сохранён, не отправлен)", order.id, why)
             summary["skipped"] += 1
@@ -210,9 +242,14 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
 
         if dry_run:
             store.upsert_response(
-                order.id, subject=order.subject, title=order.title,
-                decision="respond", reason=tri["reason"], text=tri["text"],
-                status="not_sent", error="dry-run",
+                order.id,
+                subject=order.subject,
+                title=order.title,
+                decision="respond",
+                reason=tri["reason"],
+                text=tri["text"],
+                status="not_sent",
+                error="dry-run",
             )
             log.info("заявка %s: DRY-RUN, отправка не выполнена", order.id)
             continue
@@ -221,13 +258,39 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
             order.id, _chat_title(order), tri["text"]
         )
         status = result["status"]
+
+        # До Send не дошли: сохраняем готовый draft как pending и прекращаем
+        # текущую серию, чтобы не повторять один и тот же сбой на других заявках.
+        if status in ("auth_required", "retry"):
+            store.upsert_response(
+                order.id,
+                subject=order.subject,
+                title=order.title,
+                decision="respond",
+                reason=tri["reason"],
+                text=tri["text"],
+                status="not_sent",
+                error=result.get("detail"),
+                screenshot=result.get("screenshot"),
+            )
+            summary["errors"] += 1
+            if status == "auth_required":
+                log.warning("заявка %s: AUTH_REQUIRED при отправке — цикл остановлен", order.id)
+            else:
+                log.warning("заявка %s: pre-Send сбой, повторим позже — %s", order.id, result.get("detail"))
+            break
+
         store.upsert_response(
-            order.id, subject=order.subject, title=order.title,
-            decision="respond", reason=tri["reason"], text=tri["text"],
+            order.id,
+            subject=order.subject,
+            title=order.title,
+            decision="respond",
+            reason=tri["reason"],
+            text=tri["text"],
             status=status,
-            error=result.get("detail") if status in ("error", "unknown") else None,
+            error=result.get("detail") if status == "unknown" else None,
             screenshot=result.get("screenshot"),
-            sent=status in ("sent", "unknown", "already"),
+            sent=status in ("sent", "unknown"),
         )
         if status == "sent":
             log.info("заявка %s: ОТПРАВЛЕН отклик", order.id)
@@ -236,13 +299,13 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
         elif status == "already":
             summary["responded"] += 1
         elif status == "unknown":
-            # Send был без подтверждения: считаем отправкой (fail-closed),
-            # пауза как после отправки
             summary["responded"] += 1
             human_pause(config.PAUSE_BETWEEN_SENDS_MIN_S, config.PAUSE_BETWEEN_SENDS_MAX_S)
         else:
-            log.error("заявка %s: ошибка отправки: %s", order.id, result.get("detail"))
+            # Неизвестный статус от интеграции — fail-closed: дальше не идём.
+            log.error("заявка %s: неизвестный статус отправки: %s", order.id, status)
             summary["errors"] += 1
+            break
 
         if summary["responded"] >= config.MAX_RESPONDS_PER_CYCLE:
             log.info("достигнут MAX_RESPONDS_PER_CYCLE=%s", config.MAX_RESPONDS_PER_CYCLE)
@@ -254,14 +317,8 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
 
 def cmd_run(args) -> int:
     _setup_logging()
-    # singleton: второй воркер по одному CDP/БД = двойные отправки
-    import fcntl
-
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    lock_file = open(config.DATA_DIR / "worker.lock", "w")
-    try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    lock_file = _acquire_worker_lock()
+    if lock_file is None:
         log.error("воркер уже запущен (worker.lock занят) — выходим")
         return 1
 
@@ -286,11 +343,17 @@ def cmd_run(args) -> int:
     finally:
         store.close()
         mgr.shutdown()
+        lock_file.close()
     return 0
 
 
 def cmd_once(args) -> int:
     _setup_logging()
+    lock_file = _acquire_worker_lock()
+    if lock_file is None:
+        log.error("воркер уже запущен (worker.lock занят) — once не запускаем")
+        return 1
+
     mgr = bm.BrowserManager()
     store = Store(config.DB_PATH)
     rc = 0
@@ -305,6 +368,7 @@ def cmd_once(args) -> int:
     finally:
         store.close()
         mgr.shutdown()
+        lock_file.close()
     return rc
 
 
