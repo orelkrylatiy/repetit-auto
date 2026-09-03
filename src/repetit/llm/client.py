@@ -1,6 +1,6 @@
 """Мульти-провайдерный LLM-слой: GLM (Z.AI), Claude (Anthropic/прокси), ChatGPT (OpenAI).
 
-Ключи и настройки — из окружения или ~/profi/.env (в git не попадает):
+Ключи и настройки — из окружения или ~/repetit-agent/.env (в git не попадает):
 
   LLM_PROVIDER       = glm | anthropic | openai     (по умолчанию glm)
   LLM_MODEL          — модель (по умолчанию — дефолт провайдера)

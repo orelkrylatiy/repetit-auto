@@ -57,7 +57,9 @@ def triage(order: Order) -> dict:
         data = llm.json_reply(raw)
     except Exception as e:
         log.warning("LLM сбой по заявке %s: %s", order.id, e)
-        return {"decision": "error", "reason": f"llm: {e}", "text": ""}
+        # llm_error: сеть/лимит провайдера — кандидат НЕ терминальный, повторим
+        # после cooldown (main пишет llm-cooldown и прекращает триаж цикла)
+        return {"decision": "llm_error", "reason": f"llm: {e}", "text": ""}
 
     decision = data.get("decision")
     if decision not in ("respond", "skip"):
@@ -66,8 +68,12 @@ def triage(order: Order) -> dict:
         return {"decision": "skip", "reason": str(data.get("reason") or "")[:500], "text": ""}
 
     text = str(data.get("text") or "").strip()
-    if not (80 <= len(text) <= config.MAX_TEXT_LEN):
-        return {"decision": "error", "reason": f"длина текста {len(text)} вне 80..{config.MAX_TEXT_LEN}", "text": ""}
+    if not (config.MIN_TEXT_LEN <= len(text) <= config.MAX_TEXT_LEN):
+        return {
+            "decision": "error",
+            "reason": f"длина текста {len(text)} вне {config.MIN_TEXT_LEN}..{config.MAX_TEXT_LEN}",
+            "text": "",
+        }
     if textguard.has_contacts(text):
         return {"decision": "error", "reason": "textguard: контакты в тексте", "text": ""}
     return {"decision": "respond", "reason": str(data.get("reason") or "")[:500], "text": text}

@@ -7,6 +7,7 @@ RECON §3, §9: reload — штатная команда браузера; сл�
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from urllib.parse import urlparse
@@ -25,6 +26,15 @@ class FeedError(Exception):
 
 class FeedAuthError(FeedError):
     """Редирект на логин — сессии нет."""
+
+
+def _set_cooldown(path, seconds: float) -> None:
+    """ts-файл «не дёргать до»: читает run_cycle перед reload."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(time.time() + seconds), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _path_of(url: str) -> str:
@@ -56,12 +66,20 @@ class FeedCapture:
         """Возвращает (заказы с деталями, все ID из searchOrders)."""
         ids_resp: list = []
         batch_resp: list = []
+        bad_status: list[int] = []
 
         def on_response(resp: Response) -> None:
             try:
+                if not (_is_search_orders(resp) or _is_orders_batch(resp)):
+                    return
+                if resp.status in (401, 403, 429):
+                    bad_status.append(resp.status)
+                    return
+                if resp.status != 200:
+                    return
                 if _is_search_orders(resp):
                     ids_resp.append(resp.json())
-                elif _is_orders_batch(resp):
+                else:
                     batch_resp.append(resp.json())
             except Exception:
                 pass
@@ -82,11 +100,22 @@ class FeedCapture:
             except Exception:
                 pass
 
+        # анти-долбление: 401/403 = сессия/антибот, 429 = лимит площадки
+        if 401 in bad_status or 403 in bad_status:
+            raise FeedAuthError(f"лента ответила {bad_status} — стоп-пауза")
+        if 429 in bad_status:
+            _set_cooldown(config.FEED_COOLDOWN_FILE, 30 * 60)
+            raise FeedError("лента ответила 429 — cooldown 30 мин")
+
         if not ids_resp:
             raise FeedError(
                 f"searchOrders не пойман за {config.CAPTURE_WINDOW_S} с "
                 f"(url: {self.page.url})"
             )
+        # несколько РАЗНЫХ ответов searchOrders за окно — фиксируем в лог
+        uniq = {json.dumps(x, ensure_ascii=False) for x in ids_resp}
+        if len(uniq) > 1:
+            log.warning("FEED_AMBIGUOUS: %d разных searchOrders, беру последний", len(uniq))
         all_ids = ids_resp[-1]
         if not isinstance(all_ids, list):
             raise FeedError(f"searchOrders вернул не список: {type(all_ids)}")

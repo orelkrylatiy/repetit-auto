@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS feed_seen (
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS responses (
 
 class Store:
     def __init__(self, db_path):
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path, timeout=30)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=30000")
@@ -60,6 +62,18 @@ class Store:
         self.conn.commit()
         return "KNOWN"
 
+    def register_seen_many(self, order_ids: list[int | str]) -> int:
+        """Массовая регистрация ID ленты одним запросом (сотни за цикл)."""
+        now = int(time.time())
+        rows = [(str(i), now, now) for i in order_ids]
+        self.conn.executemany(
+            "INSERT INTO feed_seen (order_id, first_seen_at, last_seen_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(order_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
     # --- отклики ---
 
     def upsert_response(
@@ -84,8 +98,8 @@ class Store:
             "subject=excluded.subject, title=excluded.title, decision=excluded.decision, "
             "reason=excluded.reason, text=excluded.text, status=excluded.status, "
             "error=excluded.error, screenshot=excluded.screenshot, "
-            "sent_at=CASE WHEN excluded.status IN ('sent','already') THEN excluded.sent_at "
-            "ELSE responses.sent_at END",
+            "sent_at=CASE WHEN excluded.status IN ('sent','unknown','already') "
+            "THEN excluded.sent_at ELSE responses.sent_at END",
             (
                 str(order_id), subject, title, decision, reason, text, status,
                 error, screenshot, now, now if sent else None,
@@ -99,13 +113,16 @@ class Store:
         ).fetchone()
 
     def sends_today(self) -> int:
+        """Расход дневного лимита: sent (подтверждено) + unknown (Send был,
+        подтверждения нет — fail-closed). already чат создала не мы — не расход."""
+
         import datetime as _dt
 
         midnight = int(
             _dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         )
         row = self.conn.execute(
-            "SELECT COUNT(*) FROM responses WHERE status IN ('sent','already') AND sent_at >= ?",
+            "SELECT COUNT(*) FROM responses WHERE status IN ('sent','unknown') AND sent_at >= ?",
             (midnight,),
         ).fetchone()
         return int(row[0])

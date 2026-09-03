@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import re
 
-# Ссылки, e-mail, мессенджеры — как есть
+# Ссылки, e-mail, мессенджеры — как есть (скайп/vk/viber/дискорд и кириллица:
+# правила площадки запрещают ЛЮБЫЕ контакты под блокировку аккаунта)
 _CONTACTS_RE = re.compile(
-    r"https?://|www\.|[\w.\-]+@[\w.\-]+|t\.me|telegram|whatsapp|телеграм",
+    r"https?://|www\.|[\w.\-]+@[\w.\-]+|t\.me|telegram|телеграм|whatsapp|ватсап|"
+    r"скайп|skype|viber|вайбер|vk\.com|вконтакте|instagram|инстаграм|discord|дискорд|"
+    r"дуов|duo\.google|zoom\.us|ханг|hangouts",
     re.I,
 )
 

@@ -89,7 +89,8 @@ SUBJECT_KEYWORDS = [
     if s.strip()
 ]
 # Минимальный бюджет клиента ₽/60 мин; 0 = не фильтровать
-MIN_CLIENT_RATE = int(_get("REPETIT_MIN_CLIENT_RATE", "0"))
+# (алиас REPETIT_MIN_CLIENT_PRICE из SPEC тоже принимается)
+MIN_CLIENT_RATE = int(_get("REPETIT_MIN_CLIENT_RATE") or _get("REPETIT_MIN_CLIENT_PRICE") or "0")
 # Особые потребности — не наш профиль (как в profi, решение владельца)
 SPECIAL_NEEDS_PATTERNS = [
     "сдвг", "adhd", "аутиз", "аутичн", "аутист", "зпр", "зпрр",
@@ -99,7 +100,12 @@ BARTER_PATTERNS = ["бартер", "обмен урок", "обмен услуг
 
 # --- денежные предохранители ---
 DAILY_SEND_LIMIT = int(_get("REPETIT_DAILY_SEND_LIMIT", "3"))  # 0 = без лимита
-MAX_TEXT_LEN = 1200  # потолок длины текста отклика
+MIN_TEXT_LEN = 100  # SPEC §18.1: лимит поля не известен (проверено ~450)
+MAX_TEXT_LEN = 450
+
+# --- cooldown-файлы (ts до которого не дёргаем) ---
+LLM_COOLDOWN_FILE = DATA_DIR / "llm-cooldown"
+FEED_COOLDOWN_FILE = DATA_DIR / "feed-cooldown"
 
 
 def _parse_work_hours(v: str | None) -> tuple[int, int]:
@@ -112,7 +118,7 @@ def _parse_work_hours(v: str | None) -> tuple[int, int]:
         return (0, 24)
 
 
-WORK_HOURS = _parse_work_hours(_get("REPETIT_WORK_HOURS"))
+WORK_HOURS = _parse_work_hours(_get("REPETIT_WORK_HOURS", "8,23"))
 
 # --- персона и LLM ---
 PERSONA = _get("REPETIT_PERSONA", "maxim")

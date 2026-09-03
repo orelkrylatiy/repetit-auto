@@ -30,12 +30,14 @@ def _host_ok(hostname: str | None) -> bool:
 
 
 def is_feed_url(url: str) -> bool:
-    """/lk/teacher/neworders* (включая карточку /neworders/{id}) — наша территория."""
+    """Строго лента /lk/teacher/neworders (без query-карточек /neworders/{id})."""
     try:
         p = urlparse(url)
     except Exception:
         return False
-    return _host_ok(p.hostname) and p.path.startswith("/lk/teacher/neworders")
+    return _host_ok(p.hostname) and (
+        p.path == "/lk/teacher/neworders" or p.path.startswith("/lk/teacher/neworders?")
+    )
 
 
 def is_login_url(url: str) -> bool:
@@ -67,7 +69,11 @@ class BrowserManager:
                     config.CDP_PORT,
                 )
                 return BROWSER_OFFLINE
-            self.browser = self._launch_and_connect()
+            try:
+                self.browser = self._launch_and_connect()
+            except FileNotFoundError:
+                log.error("Chrome не найден (%s) — проверь REPETIT_CHROME_PATH", config.CHROME_PATH)
+                return BROWSER_OFFLINE
         if self.browser is None:
             return BROWSER_OFFLINE
 
