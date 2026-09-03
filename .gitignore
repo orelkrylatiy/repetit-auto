@@ -1,9 +1,9 @@
-.venv/
 __pycache__/
 *.pyc
+.venv/
+.env
 data/
 logs/
-chrome-profile/
-.env
+.pytest_cache/
+.ruff_cache/
 .DS_Store
-accounts/*.env
