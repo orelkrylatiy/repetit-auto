@@ -134,8 +134,11 @@ def _post(url: str, headers: dict, payload: dict) -> dict:
         raise RuntimeError(f"HTTP {e.code} от {url}: {body}") from e
 
 
-def _chat_openai_style(system: str, user: str, temperature: float, max_tokens: int) -> str:
+def _chat_openai_style(
+    system: str, user: str, temperature: float, max_tokens: int, model: str | None = None
+) -> str:
     """OpenAI-совместимый протокол (glm, openai). С фоллбэком на второй ключ."""
+    m = model or _model(provider())
     keys: list[tuple[str, str]] = []
     key, kname = _key(provider())
     if key:
@@ -153,7 +156,7 @@ def _chat_openai_style(system: str, user: str, temperature: float, max_tokens: i
                 _base(provider()) + "/chat/completions",
                 {"Content-Type": "application/json", "Authorization": f"Bearer {k}"},
                 {
-                    "model": _model(provider()),
+                    "model": m,
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},
