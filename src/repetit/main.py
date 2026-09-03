@@ -75,8 +75,9 @@ def _gates_ok(store: Store) -> tuple[bool, str]:
 
 
 def _close_stray_tabs(mgr: bm.BrowserManager) -> None:
-    """Гигиена: висящие после kill вкладки чатов/карточек закрываем
-    (ленту mgr.page не трогаем)."""
+    """Гигиена: дубли ленты и свои висящие вкладки чатов/карточек закрываем.
+    Вкладка воркера (mgr.page) не трогается; чужие вкладки владельца
+    (не repetit-лента/чат по заявке) не трогаем."""
     import re
 
     try:
@@ -95,6 +96,10 @@ def _close_stray_tabs(mgr: bm.BrowserManager) -> None:
             ):
                 p.close(run_before_unload=False)
                 log.info("гигиена: закрыта висящая вкладка %s", url[:80])
+            elif bm.is_feed_url(url):
+                # дубль ленты (утечка пробы/падения) — наша постоянная одна
+                p.close(run_before_unload=False)
+                log.info("гигиена: закрыт дубль ленты %s", url[:80])
         except Exception:
             continue
 
