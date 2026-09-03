@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import sys
+
 from playwright.sync_api import sync_playwright
 
 CDP = "http://127.0.0.1:9335"
