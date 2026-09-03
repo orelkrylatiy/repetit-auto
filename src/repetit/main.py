@@ -92,35 +92,6 @@ def _gates_ok(store: Store) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _close_stray_tabs(mgr: bm.BrowserManager) -> None:
-    """Гигиена: дубли ленты и свои висящие вкладки чатов/карточек закрываем.
-    Вкладка воркера (mgr.page) не трогается; чужие вкладки владельца
-    (не repetit-лента/чат по заявке) не трогаем."""
-    import re
-
-    try:
-        pages = list(mgr.context().pages)
-    except Exception:
-        return
-    for p in pages:
-        try:
-            if p is mgr.page:
-                continue
-            url = p.url
-            # Только СВОИ следы: чат по заявке (?orderId=) и карточки заявок.
-            # chatforteacher?chatId= может быть открыт владельцем вручную — не трогаем.
-            if ("chatforteacher" in url and "orderid=" in url.lower()) or re.search(
-                r"neworders/\d+", url
-            ):
-                p.close(run_before_unload=False)
-                log.info("гигиена: закрыта висящая вкладка %s", url[:80])
-            elif bm.is_feed_url(url):
-                p.close(run_before_unload=False)
-                log.info("гигиена: закрыт дубль ленты %s", url[:80])
-        except Exception:
-            continue
-
-
 def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> dict:
     """Один цикл воркера. Возвращает сводку."""
     summary = {"new": 0, "responded": 0, "skipped": 0, "errors": 0}
@@ -142,7 +113,9 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
         log.warning("браузер не готов: %s", state)
         return summary
 
-    _close_stray_tabs(mgr)
+    # Не закрываем «лишние» вкладки эвристикой. После рестарта нельзя надёжно
+    # отличить старую вкладку воркера от вкладки, которую владелец открыл руками.
+    # Responder всегда закрывает только созданную им страницу в собственном finally.
 
     try:
         orders, all_ids = FeedCapture(mgr.page).reload_and_capture()
@@ -277,7 +250,11 @@ def run_cycle(mgr: bm.BrowserManager, store: Store, dry_run: bool = False) -> di
             if status == "auth_required":
                 log.warning("заявка %s: AUTH_REQUIRED при отправке — цикл остановлен", order.id)
             else:
-                log.warning("заявка %s: pre-Send сбой, повторим позже — %s", order.id, result.get("detail"))
+                log.warning(
+                    "заявка %s: pre-Send сбой, повторим позже — %s",
+                    order.id,
+                    result.get("detail"),
+                )
             break
 
         store.upsert_response(
