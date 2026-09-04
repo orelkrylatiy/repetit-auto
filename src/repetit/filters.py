@@ -27,6 +27,10 @@ def hard_filter(order: Order) -> FilterVerdict:
         if p in s:
             return FilterVerdict(False, f"бартер/бесплатно: {p}")
 
+    for p in config.STOP_PATTERNS:
+        if p in s:
+            return FilterVerdict(False, f"стоп-слово: {p}")
+
     # очные занятия — не наш формат; regex: не задеваем «заочно»
     if any(re.search(p, s) for p in config.ONSITE_PATTERNS):
         return FilterVerdict(False, "очные занятия (мы дистанционные)")
