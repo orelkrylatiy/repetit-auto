@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+
 from repetit import config
 from repetit.models.order import Order
 from repetit.models.verdict import FilterVerdict
@@ -24,6 +26,10 @@ def hard_filter(order: Order) -> FilterVerdict:
     for p in config.BARTER_PATTERNS:
         if p in s:
             return FilterVerdict(False, f"бартер/бесплатно: {p}")
+
+    # очные занятия — не наш формат; regex: не задеваем «заочно»
+    if any(re.search(p, s) for p in config.ONSITE_PATTERNS):
+        return FilterVerdict(False, "очные занятия (мы дистанционные)")
 
     if config.MIN_CLIENT_RATE > 0:
         top = order.max_price or order.min_price
