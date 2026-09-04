@@ -1,8 +1,8 @@
 """FeedCapture: reload ленты neworders → перехват searchOrders + батча деталей.
 
-RECON §3, §9: reload — штатная команда браузера; слушатель ставится ДО reload
-(как в profi). searchOrders даёт упорядоченный список ID (новые сверху),
-батч /orders?ids= — детали первых ~21. Пассивное чтение, viewed не ставится.
+RECON §3: reload — штатная команда браузера; слушатель ставится ДО reload.
+searchOrders даёт упорядоченный список ID (новые сверху), батч /orders?ids=
+— детали первых ~21. Пассивное чтение, viewed не ставится.
 """
 
 from __future__ import annotations
@@ -37,14 +37,34 @@ def _set_cooldown(path, seconds: float) -> None:
         pass
 
 
+def _parsed(url: str):
+    try:
+        return urlparse(url)
+    except Exception:
+        return None
+
+
+def _is_repetit_url(url: str) -> bool:
+    parsed = _parsed(url)
+    if parsed is None or parsed.scheme != "https":
+        return False
+    host = parsed.hostname
+    return host == "repetit.ru" or bool(host and host.endswith(".repetit.ru"))
+
+
 def _path_of(url: str) -> str:
-    return urlparse(url).path
+    parsed = _parsed(url)
+    return parsed.path if parsed is not None else ""
 
 
 def _is_search_orders(resp: Response) -> bool:
     try:
         req = resp.request
-        return req.method == "POST" and _path_of(resp.url) == config.API_SEARCH_ORDERS_PATH
+        return (
+            req.method == "POST"
+            and _is_repetit_url(resp.url)
+            and _path_of(resp.url) == config.API_SEARCH_ORDERS_PATH
+        )
     except Exception:
         return False
 
@@ -52,7 +72,11 @@ def _is_search_orders(resp: Response) -> bool:
 def _is_orders_batch(resp: Response) -> bool:
     try:
         req = resp.request
-        return req.method == "GET" and _path_of(resp.url) == config.API_ORDERS_BATCH_PATH
+        return (
+            req.method == "GET"
+            and _is_repetit_url(resp.url)
+            and _path_of(resp.url) == config.API_ORDERS_BATCH_PATH
+        )
     except Exception:
         return False
 
@@ -113,8 +137,7 @@ class FeedCapture:
 
         if not ids_resp:
             raise FeedError(
-                f"searchOrders не пойман за {config.CAPTURE_WINDOW_S} с "
-                f"(url: {self.page.url})"
+                f"searchOrders не пойман за {config.CAPTURE_WINDOW_S} с (url: {self.page.url})"
             )
 
         # Несколько РАЗНЫХ searchOrders в одном capture-окне — не выбираем
