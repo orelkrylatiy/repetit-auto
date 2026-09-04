@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS responses (
     decision    TEXT NOT NULL,      -- respond / skip / error / filtered
     reason      TEXT,
     text        TEXT,
-    status      TEXT NOT NULL,      -- not_sent / sent / already / error
+    status      TEXT NOT NULL,      -- not_sent / sent / already / unknown / error
     error       TEXT,
     screenshot  TEXT,
     created_at  INTEGER NOT NULL,
@@ -98,11 +98,20 @@ class Store:
             "subject=excluded.subject, title=excluded.title, decision=excluded.decision, "
             "reason=excluded.reason, text=excluded.text, status=excluded.status, "
             "error=excluded.error, screenshot=excluded.screenshot, "
-            "sent_at=CASE WHEN excluded.status IN ('sent','unknown','already') "
+            "sent_at=CASE WHEN excluded.status IN ('sent','unknown') "
             "THEN excluded.sent_at ELSE responses.sent_at END",
             (
-                str(order_id), subject, title, decision, reason, text, status,
-                error, screenshot, now, now if sent else None,
+                str(order_id),
+                subject,
+                title,
+                decision,
+                reason,
+                text,
+                status,
+                error,
+                screenshot,
+                now,
+                now if sent else None,
             ),
         )
         self.conn.commit()
@@ -113,9 +122,7 @@ class Store:
         ).fetchone()
 
     def sends_today(self) -> int:
-        """Расход дневного лимита: sent (подтверждено) + unknown (Send был,
-        подтверждения нет — fail-closed). already чат создала не мы — не расход."""
-
+        """Расход дневного лимита: sent + unknown. `already` лимит не расходует."""
         import datetime as _dt
 
         midnight = int(

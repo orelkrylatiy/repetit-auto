@@ -21,6 +21,7 @@ log = logging.getLogger("repetit.browser")
 READY = "READY"
 BROWSER_OFFLINE = "BROWSER_OFFLINE"
 AUTH_REQUIRED = "AUTH_REQUIRED"
+_WORKER_FEED_FRAGMENT = "repetit-worker"
 
 
 def _host_ok(hostname: str | None) -> bool:
@@ -30,14 +31,25 @@ def _host_ok(hostname: str | None) -> bool:
 
 
 def is_feed_url(url: str) -> bool:
-    """Строго лента /lk/teacher/neworders (без query-карточек /neworders/{id})."""
+    """Строго лента /lk/teacher/neworders, query/fragment допустимы."""
     try:
         p = urlparse(url)
     except Exception:
         return False
-    return _host_ok(p.hostname) and (
-        p.path == "/lk/teacher/neworders" or p.path.startswith("/lk/teacher/neworders?")
-    )
+    return _host_ok(p.hostname) and p.path.rstrip("/") == "/lk/teacher/neworders"
+
+
+def _is_worker_feed_url(url: str) -> bool:
+    """Лента, явно помеченная как принадлежащая воркеру.
+
+    Fragment не уходит на сервер и не меняет API-запросы страницы, зато после
+    CDP reconnect позволяет не подхватить обычную вкладку владельца.
+    """
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    return is_feed_url(url) and p.fragment == _WORKER_FEED_FRAGMENT
 
 
 def is_login_url(url: str) -> bool:
@@ -80,11 +92,10 @@ class BrowserManager:
         ctx = self._default_context()
         page = self._find_our_page(ctx)
         if page is None:
+            # Не переиспользуем обычную feed-вкладку: она может принадлежать
+            # владельцу. Воркер создаёт отдельную, помеченную fragment-маркером.
             page = ctx.new_page()
-            try:
-                page.goto(config.FEED_URL, wait_until="domcontentloaded", timeout=45_000)
-            except Exception as e:
-                log.warning("goto feed failed: %s", e)
+            self._goto_feed(page)
         self.page = page
         return self.check_session()
 
@@ -175,11 +186,22 @@ class BrowserManager:
     def _find_our_page(self, ctx: BrowserContext) -> Page | None:
         for page in ctx.pages:
             try:
-                if is_feed_url(page.url):
+                if _is_worker_feed_url(page.url):
                     return page
             except Exception:
                 continue
         return None
+
+    @staticmethod
+    def _goto_feed(page: Page) -> None:
+        try:
+            page.goto(
+                f"{config.FEED_URL}#{_WORKER_FEED_FRAGMENT}",
+                wait_until="domcontentloaded",
+                timeout=45_000,
+            )
+        except Exception as e:
+            log.warning("goto feed failed: %s", e)
 
     # --- session health-check ---
 
@@ -202,27 +224,55 @@ class BrowserManager:
                 )
                 self._login_hint_shown = True
             return AUTH_REQUIRED
+        if not is_feed_url(url):
+            log.warning("worker page не на ленте: %s", url)
+            return BROWSER_OFFLINE
+        self._login_hint_shown = False
         return READY
 
     def ensure_ready(self) -> str:
         if not self._browser_connected():
             return self.reconnect()
+
         page = self.page
         try:
             page_closed = page is None or page.is_closed()
         except Exception:
             return self.reconnect()
+
         if page_closed:
             try:
                 ctx = self._default_context()
                 page = self._find_our_page(ctx)
                 if page is None:
                     page = ctx.new_page()
-                    try:
-                        page.goto(config.FEED_URL, wait_until="domcontentloaded", timeout=45_000)
-                    except Exception as e:
-                        log.warning("goto feed failed: %s", e)
+                    self._goto_feed(page)
                 self.page = page
             except Exception:
                 return self.reconnect()
+            return self.check_session()
+
+        # Если наша постоянная вкладка ушла на логин, не навигируем поверх неё:
+        # человек должен восстановить сессию вручную.
+        try:
+            current_url = page.url
+        except Exception:
+            return self.reconnect()
+        if is_login_url(current_url):
+            return self.check_session()
+
+        # Вкладка могла уйти на home/about:blank/error после ручного действия или
+        # неудачного goto. Ищем только вкладку с worker-маркером; обычную ленту
+        # владельца не подхватываем и не перезагружаем.
+        if not is_feed_url(current_url):
+            try:
+                ctx = self._default_context()
+                feed_page = self._find_our_page(ctx)
+                if feed_page is not None and feed_page is not page:
+                    self.page = feed_page
+                else:
+                    self._goto_feed(page)
+            except Exception:
+                return self.reconnect()
+
         return self.check_session()

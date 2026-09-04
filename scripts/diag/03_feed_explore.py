@@ -1,6 +1,11 @@
-"""Пробник 03: АКТИВНО — клик «Заявки» в меню, полный capture сети + DOM ленты.
+"""Диагностика 03: пассивный capture ленты «Новые заявки».
 
-Логируем всё: URL, статусы, JSON-тела ответов (в файл), скриншот, текст DOM.
+Открывает `/lk/teacher/neworders` в собственной временной вкладке, собирает
+XHR/fetch и DOM для диагностики контрактов feed. Карточки заявок и чаты не
+открывает, поэтому `viewed` не ставит и сообщений не отправляет.
+
+Сырые ответы могут содержать данные заявок. Артефакты пишутся только в
+`logs/recon/`, который исключён из git.
 """
 
 from __future__ import annotations
@@ -8,88 +13,82 @@ from __future__ import annotations
 import json
 import sys
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
 CDP = "http://127.0.0.1:9335"
-HOME = "https://repetit.ru/lk/teacher/home"
-OUT = "logs/recon/03_feed"
+FEED = "https://repetit.ru/lk/teacher/neworders"
+OUT_DIR = Path("logs/recon")
+OUT_PREFIX = OUT_DIR / "03_feed"
 
 
 def main() -> int:
     captured: list[dict] = []
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as pw:
         browser = pw.chromium.connect_over_cdp(CDP, timeout=5_000)
         ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-
-        def on_response(resp) -> None:
-            try:
-                req = resp.request
-                rt = req.resource_type
-                if rt not in ("xhr", "fetch"):
-                    return
-                item = {
-                    "ts": round(time.time(), 3),
-                    "method": req.method,
-                    "url": resp.url,
-                    "status": resp.status,
-                    "req_body": None,
-                    "resp_body": None,
-                }
+        page = ctx.new_page()
+        try:
+            def on_response(resp) -> None:
                 try:
-                    pd = req.post_data
-                    item["req_body"] = pd[:2000] if pd else None
+                    req = resp.request
+                    if req.resource_type not in ("xhr", "fetch"):
+                        return
+                    item = {
+                        "ts": round(time.time(), 3),
+                        "method": req.method,
+                        "url": resp.url,
+                        "status": resp.status,
+                        "req_body": None,
+                        "resp_body": None,
+                    }
+                    try:
+                        post_data = req.post_data
+                        item["req_body"] = post_data[:2000] if post_data else None
+                    except Exception:
+                        pass
+                    content_type = (resp.headers or {}).get("content-type", "")
+                    if "json" in content_type:
+                        try:
+                            item["resp_body"] = resp.json()
+                        except Exception:
+                            item["resp_body"] = "<unparseable>"
+                    captured.append(item)
                 except Exception:
                     pass
-                ct = (resp.headers or {}).get("content-type", "")
-                if "json" in ct:
-                    try:
-                        item["resp_body"] = resp.json()
-                    except Exception:
-                        item["resp_body"] = "<unparseable>"
-                captured.append(item)
-            except Exception:
-                pass
 
-        page.on("response", on_response)
-        page.goto(HOME, wait_until="domcontentloaded", timeout=45_000)
-        page.wait_for_timeout(2_500)
+            page.on("response", on_response)
+            page.goto(FEED, wait_until="domcontentloaded", timeout=45_000)
+            page.wait_for_timeout(5_000)
 
-        # АКТИВНО: клик по пункту меню «Заявки»
-        try:
-            menu_item = page.get_by_text("Заявки", exact=True).first
-            menu_item.click(timeout=5_000)
-        except Exception as e:
-            print(f"клик «Заявки» не удался: {e}")
-        page.wait_for_timeout(5_000)
+            url, title = page.url, page.title()
+            print(f"URL: {url}\ntitle: {title}\n")
 
-        url, title = page.url, page.title()
-        print(f"URL: {url}\ntitle: {title}\n")
+            body_text = page.locator("body").inner_text()
+            Path(f"{OUT_PREFIX}_body.txt").write_text(body_text, encoding="utf-8")
+            print("=== body[:1500] ===")
+            print(body_text[:1500])
 
-        body_text = page.evaluate("() => document.body.innerText")
-        with open(f"{OUT}_body.txt", "w", encoding="utf-8") as f:
-            f.write(body_text)
-        print("=== body[:1500] ===")
-        print(body_text[:1500])
+            page.screenshot(path=f"{OUT_PREFIX}_screen.png", full_page=False)
+            page.remove_listener("response", on_response)
+        finally:
+            page.close(run_before_unload=False)
 
-        page.screenshot(path=f"{OUT}_screen.png", full_page=False)
-        page.remove_listener("response", on_response)
-
-    # сводка
     print("\n=== XHR/FETCH (кратко) ===")
-    for c in captured:
-        p = urlparse(c["url"])
-        size = len(json.dumps(c["resp_body"], ensure_ascii=False)) if c["resp_body"] else 0
-        print(f"  {c['status']} {c['method']} {p.path}  resp~{size}b")
-        if c["req_body"]:
-            print(f"      req: {c['req_body'][:200]}")
+    for item in captured:
+        parsed = urlparse(item["url"])
+        size = len(json.dumps(item["resp_body"], ensure_ascii=False)) if item["resp_body"] else 0
+        print(f"  {item['status']} {item['method']} {parsed.path}  resp~{size}b")
+        if item["req_body"]:
+            print(f"      req: {item['req_body'][:200]}")
 
-    with open(f"{OUT}_net.json", "w", encoding="utf-8") as f:
-        json.dump(captured, f, ensure_ascii=False, indent=1)
-    print(f"\nсохранено: {OUT}_net.json, {OUT}_body.txt, {OUT}_screen.png")
+    net_path = Path(f"{OUT_PREFIX}_net.json")
+    net_path.write_text(json.dumps(captured, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"\nсохранено: {net_path}, {OUT_PREFIX}_body.txt, {OUT_PREFIX}_screen.png")
     return 0
 
 
