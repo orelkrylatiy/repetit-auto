@@ -59,7 +59,15 @@ def test_order_from_api_tolerates_missing_optional_nested_fields():
 
 def test_hard_filter_rejects_wrong_subject(monkeypatch):
     monkeypatch.setattr(config, "SUBJECT_KEYWORDS", ["информатик", "программирован"])
-    verdict = hard_filter(_order(subject={"id": 20, "name": "Математика"}, information="Алгебра"))
+    verdict = hard_filter(
+        _order(
+            subject={"id": 20, "name": "Математика"},
+            purpose="Подтянуть алгебру",
+            information="Нужно разобрать квадратные уравнения",
+            subjectAdditions=[],
+            subjectDivisions=[],
+        )
+    )
     assert not verdict.passed
     assert "не наш предмет" in verdict.reason
 
