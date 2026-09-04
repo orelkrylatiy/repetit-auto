@@ -71,13 +71,18 @@ def _acquire_worker_lock():
     И `run`, и `once` используют один Chrome/SQLite. Без общего lock ручной
     `once` параллельно постоянному worker может отправить дубль.
     """
-    import fcntl
-
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     lock_file = open(config.DATA_DIR / "worker.lock", "w")
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        try:
+            import fcntl
+
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError:  # Windows
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    except (BlockingIOError, OSError):
         lock_file.close()
         return None
     return lock_file

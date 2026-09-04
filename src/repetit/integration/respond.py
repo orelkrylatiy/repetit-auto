@@ -29,6 +29,10 @@ log = logging.getLogger("repetit.respond")
 _COMPOSER = '[data-testid="message-composer-input"]'
 _SEND_BTN = '[data-testid="message-composer-send-button"]'
 _CHATS_ORDER_PATH = "/api/teacher/chats/order"
+# Живой факт 2026-09-04: свежий чат проверяется эндпоинтом ws.repetit.ru,
+# пустой чат = HTTP 204 (тело отсутствует). /lk/api/teacher/chats/order
+# площадка больше не дёргает — оставляем распознавание на всякий случай.
+_WS_CHATS_PERSONAL = "ws.repetit.ru/api/chats/personal"
 _CHAT_STATE_WAIT_S = 5.0
 
 
@@ -41,14 +45,22 @@ class RespondAuthError(RespondError):
 
 
 def _chat_has_history(payload) -> bool:
-    """GET /api/teacher/chats/order → result: есть история/последнее сообщение?"""
+    """Проверка существующего чата (chats/personal | chats/order).
+
+    Fail-closed: пустой payload {} — истории нет; неизвестная форма или
+    несловарный JSON — считаем что история есть (лучше скип, чем дубль).
+    """
     if not isinstance(payload, dict):
+        return True
+    if not payload:
         return False
-    result = payload.get("result") or {}
+    result = payload.get("result") or payload
     if result.get("lastMessage"):
         return True
     messages = result.get("messages")
-    return isinstance(messages, list) and len(messages) > 0
+    if isinstance(messages, list):
+        return len(messages) > 0
+    return True  # форма ответа незнакома — не рискуем
 
 
 class Responder:
@@ -67,7 +79,18 @@ class Responder:
 
             def on_chat_api(resp) -> None:
                 try:
-                    if _CHATS_ORDER_PATH not in resp.url or resp.request.method != "GET":
+                    url = resp.url or ""
+                    method = resp.request.method
+                    is_legacy = method == "GET" and _CHATS_ORDER_PATH in url
+                    is_personal = (
+                        method == "GET"
+                        and _WS_CHATS_PERSONAL in url
+                        and f"orderId={order_id}" in url
+                    )
+                    if not (is_legacy or is_personal):
+                        return
+                    if is_personal and resp.status == 204:
+                        chat_state["payload"] = {}  # пусто = чата с историей нет
                         return
                     if resp.status != 200:
                         chat_state["error"] = f"HTTP {resp.status}"
