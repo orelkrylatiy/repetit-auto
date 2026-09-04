@@ -115,7 +115,14 @@ class FeedCapture:
                 raise FeedAuthError(f"редирект на {self.page.url}")
 
             deadline = time.monotonic() + config.CAPTURE_WINDOW_S
-            while time.monotonic() < deadline and not (ids_resp and batch_resp):
+            while time.monotonic() < deadline:
+                # Для непустой ленты ждём и ID, и batch деталей. Если сайт уже
+                # вернул канонический пустой список, detail batch не нужен и нет
+                # смысла ждать весь CAPTURE_WINDOW_S; extra-window ниже всё равно
+                # доберёт возможный повтор searchOrders для ambiguity check.
+                empty_feed = bool(ids_resp) and ids_resp[-1] == []
+                if ids_resp and (batch_resp or empty_feed):
+                    break
                 self.page.wait_for_timeout(200)
             self.page.wait_for_timeout(int(config.CAPTURE_EXTRA_S * 1000))
         finally:
