@@ -72,7 +72,10 @@ def _acquire_worker_lock():
     `once` параллельно постоянному worker может отправить дубль.
     """
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    lock_file = open(config.DATA_DIR / "worker.lock", "w")
+    # Лок на инстанс, не на репозиторий: второй акк (REPETIT_LOG_TAG=info,
+    # браузер profi3) должен жить параллельно основному.
+    _lock_name = f"worker-{config.LOG_TAG}.lock" if config.LOG_TAG else "worker.lock"
+    lock_file = open(config.DATA_DIR / _lock_name, "w")
     try:
         try:
             import fcntl
