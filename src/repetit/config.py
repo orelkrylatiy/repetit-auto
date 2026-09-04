@@ -77,7 +77,6 @@ CYCLE_MIN_S = int(_get("REPETIT_CYCLE_MIN", "90"))
 CYCLE_MAX_S = int(_get("REPETIT_CYCLE_MAX", "120"))
 CAPTURE_WINDOW_S = 10.0  # ждём первый ответ ленты после reload
 CAPTURE_EXTRA_S = 3.0  # добираем повторы
-AUTH_WAIT_S = 30  # период проверки при вылогине
 MAX_RESPONDS_PER_CYCLE = int(_get("REPETIT_MAX_PER_CYCLE", "3"))
 PAUSE_BETWEEN_SENDS_MIN_S = 20.0
 PAUSE_BETWEEN_SENDS_MAX_S = 45.0
