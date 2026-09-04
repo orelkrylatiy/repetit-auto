@@ -93,17 +93,32 @@ def _persona() -> str:
 def triage(order: Order) -> dict:
     """LLM-вердикт по заявке. Возвращает {decision, reason, text}.
 
-    Сетевые/API ошибки → decision=llm_error (кандидат остаётся для повтора
-    после cooldown). Детерминированный брак ответа → decision=error.
+    Сетевые/API ошибки → decision=llm_error: main включает общий LLM cooldown,
+    кандидат остаётся pending. Невалидный ответ модели (не JSON-объект,
+    неправильный decision, длина, контакты) → decision=error только для этой
+    заявки: такой ответ не должен останавливать LLM для всех остальных.
     """
     system = (_RULES + "\n\nПерсона репетитора:\n" + _persona()).strip()
     user = json.dumps(order.triage_dict(), ensure_ascii=False)
+
     try:
         raw = llm.chat(system, user, temperature=0.4, max_tokens=2000)
-        data = llm.json_reply(raw)
     except Exception as e:
         log.warning("LLM сбой по заявке %s: %s", order.id, e)
         return {"decision": "llm_error", "reason": f"llm: {e}", "text": ""}
+
+    try:
+        data = llm.json_reply(raw)
+    except Exception as e:
+        log.warning("LLM вернул невалидный JSON по заявке %s: %s", order.id, e)
+        return {"decision": "error", "reason": f"невалидный JSON: {e}", "text": ""}
+
+    if not isinstance(data, dict):
+        return {
+            "decision": "error",
+            "reason": f"JSON-ответ должен быть объектом, получен {type(data).__name__}",
+            "text": "",
+        }
 
     decision = data.get("decision")
     if decision not in ("respond", "skip"):
