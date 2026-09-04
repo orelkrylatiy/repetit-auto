@@ -40,8 +40,11 @@ def _get(name: str, default: str | None = None) -> str | None:
 DATA_DIR = PROJECT_DIR / "data"
 LOG_DIR = PROJECT_DIR / "logs"
 DB_PATH = Path(_get("REPETIT_DB", str(DATA_DIR / "repetit.db")))
-WORKER_LOG = LOG_DIR / "worker.log"
-RESPOND_SHOT_DIR = LOG_DIR / "respond"
+# Несколько воркеров на одной машине (второй акк живёт в браузере profi3,
+# CDP 9224): REPETIT_LOG_TAG разводит файлы лога и скриншотов по инстансам.
+LOG_TAG = _get("REPETIT_LOG_TAG", "").strip()
+WORKER_LOG = LOG_DIR / (f"worker-{LOG_TAG}.log" if LOG_TAG else "worker.log")
+RESPOND_SHOT_DIR = LOG_DIR / (f"respond-{LOG_TAG}" if LOG_TAG else "respond")
 
 # --- Chrome: внешний процесс, свой профиль и CDP-порт ---
 CHROME_NO_LAUNCH = _get("REPETIT_CHROME_NO_LAUNCH", "0") == "1"
