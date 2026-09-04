@@ -88,20 +88,36 @@ SUBJECT_KEYWORDS = [
     for s in _get("REPETIT_SUBJECTS", "информатик,программирован").split(",")
     if s.strip()
 ]
-# Минимальный бюджет клиента ₽/60 мин; 0 = не фильтровать
-# (алиас REPETIT_MIN_CLIENT_PRICE из SPEC тоже принимается)
+# Минимальный бюджет клиента ₽/60 мин; 0 = не фильтровать.
+# Алиас REPETIT_MIN_CLIENT_PRICE из ранней версии SPEC тоже принимается.
 MIN_CLIENT_RATE = int(_get("REPETIT_MIN_CLIENT_RATE") or _get("REPETIT_MIN_CLIENT_PRICE") or "0")
-# Особые потребности — не наш профиль (как в profi, решение владельца)
+# Особые потребности — не наш профиль (как в profi, решение владельца).
 SPECIAL_NEEDS_PATTERNS = [
-    "сдвг", "adhd", "аутиз", "аутичн", "аутист", "зпр", "зпрр",
-    "дислекси", "дисграфи", "овз", "дцп",
+    "сдвг",
+    "adhd",
+    "аутиз",
+    "аутичн",
+    "аутист",
+    "зпр",
+    "зпрр",
+    "дислекси",
+    "дисграфи",
+    "овз",
+    "дцп",
 ]
-BARTER_PATTERNS = ["бартер", "обмен урок", "обмен услуг", "взаимозачёт", "взаимозачет", "бесплатн"]
+BARTER_PATTERNS = [
+    "бартер",
+    "обмен урок",
+    "обмен услуг",
+    "взаимозачёт",
+    "взаимозачет",
+    "бесплатн",
+]
 
 # --- денежные предохранители ---
 DAILY_SEND_LIMIT = int(_get("REPETIT_DAILY_SEND_LIMIT", "3"))  # 0 = без лимита
 # Живой факт 2026-09-03: реальные отправки 497–576 символов приняты площадкой.
-# Верхняя граница = проверенное + запас; промпт просит короче (3–6 предложений)
+# Верхняя граница = проверенное + запас; промпт просит короче (3–6 предложений).
 MIN_TEXT_LEN = 100
 MAX_TEXT_LEN = 600
 
@@ -109,15 +125,27 @@ MAX_TEXT_LEN = 600
 LLM_COOLDOWN_FILE = DATA_DIR / "llm-cooldown"
 FEED_COOLDOWN_FILE = DATA_DIR / "feed-cooldown"
 
+DEFAULT_WORK_HOURS = (8, 23)
+
 
 def _parse_work_hours(v: str | None) -> tuple[int, int]:
+    """Разобрать `lo,hi` как полуинтервал часов [lo, hi).
+
+    Некорректная настройка не должна случайно включать воркер 24/7, поэтому
+    при любой ошибке возвращаем безопасный дефолт 08:00–23:00. Круглосуточный
+    режим задаётся только явно как `0,24`.
+    """
     if not v or "," not in v:
-        return (0, 24)
-    lo, _, hi = v.partition(",")
+        return DEFAULT_WORK_HOURS
+    lo_raw, _, hi_raw = v.partition(",")
     try:
-        return (max(0, int(lo.strip())), min(24, int(hi.strip())))
+        lo = int(lo_raw.strip())
+        hi = int(hi_raw.strip())
     except ValueError:
-        return (0, 24)
+        return DEFAULT_WORK_HOURS
+    if not (0 <= lo < hi <= 24):
+        return DEFAULT_WORK_HOURS
+    return lo, hi
 
 
 WORK_HOURS = _parse_work_hours(_get("REPETIT_WORK_HOURS", "8,23"))
