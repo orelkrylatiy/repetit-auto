@@ -9,7 +9,7 @@
 - `docs/RECON.md` — подтверждённые факты площадки;
 - `docs/SPEC.md` — текущее поведение runtime и статусы;
 - `README.md` — запуск и эксплуатация;
-- `docs/reference/` — только исторический reference из `profi-agent`, не runtime contract.
+- `docs/reference/HUMAN_STYLE.md` — стилевой reference для текста отклика.
 
 ## Неприкосновенные safety-инварианты
 
@@ -111,6 +111,7 @@ src/repetit/
   models/
   utils/
 personas/maxim.md
+docs/reference/HUMAN_STYLE.md
 scripts/diag/01..03
 tests/
 ```
