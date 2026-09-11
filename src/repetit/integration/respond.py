@@ -1,17 +1,7 @@
-"""Responder: первый отклик = первое сообщение в чат по заявке (RECON §5).
+"""Responder: первый отклик = первое сообщение в чат по заявке.
 
-Человеческий ввод (RULES §1): посимвольный тайп через playwright.type с
-delay, клики по элементам. Никаких page.evaluate-действий. Отправка уходит
-через WS площадки — воркеру транспорт безразличен, успех подтверждаем по DOM.
-
-Статусы:
-  sent          — текст появился в чате И композер очистился
-  already       — чат уже существует с историей / наш текст уже там
-  unknown       — клик Send был, подтверждения за окно нет; повтор запрещён
-  auth_required — чат ушёл на логин; цикл должен остановить отправки
-  retry         — до Send не дошло из-за временного/неясного состояния UI
-
-«Обменяться контактами» (платная квота) — НЕ трогаем никогда.
+Человеческий ввод через Playwright UI. Никаких page.evaluate-действий.
+Успех подтверждаем по DOM: наш текст появился И composer очистился.
 """
 
 from __future__ import annotations
@@ -22,18 +12,13 @@ import time
 from playwright.sync_api import BrowserContext, Page
 
 from repetit import config
+from repetit.integration.chat import is_chat_state_url
 from repetit.utils.pacing import human_pause, type_human
 
 log = logging.getLogger("repetit.respond")
 
 _COMPOSER = '[data-testid="message-composer-input"]'
 _SEND_BTN = '[data-testid="message-composer-send-button"]'
-_CHATS_ORDER_PATH = "/api/teacher/chats/order"
-# Живой факт 2026-09-04: свежий чат проверяется эндпоинтом ws.repetit.ru,
-# пустой чат = HTTP 204 (тело отсутствует). /lk/api/teacher/chats/order
-# площадка больше не дёргает — оставляем распознавание на всякий случай.
-_WS_CHATS_PERSONAL = "ws.repetit.ru/api/chats/personal"
-_CHAT_STATE_WAIT_S = 5.0
 
 
 class RespondError(Exception):
@@ -45,7 +30,7 @@ class RespondAuthError(RespondError):
 
 
 def _chat_has_history(payload) -> bool:
-    """Проверка существующего чата (chats/personal | chats/order).
+    """Проверка существующего чата.
 
     Fail-closed: пустой payload {} — истории нет; неизвестная форма или
     несловарный JSON — считаем что история есть (лучше скип, чем дубль).
@@ -55,12 +40,14 @@ def _chat_has_history(payload) -> bool:
     if not payload:
         return False
     result = payload.get("result") or payload
+    if not isinstance(result, dict):
+        return True
     if result.get("lastMessage"):
         return True
     messages = result.get("messages")
     if isinstance(messages, list):
         return len(messages) > 0
-    return True  # форма ответа незнакома — не рискуем
+    return True
 
 
 class Responder:
@@ -71,26 +58,16 @@ class Responder:
         """Отправить первое сообщение. Возвращает {status, detail, screenshot}."""
         page: Page = self.ctx.new_page()
         shot = None
+        clicked = False
         try:
-            # Пассивно слушаем чат-API ДО перехода. Нельзя отправлять первое
-            # сообщение, пока не убедились, что истории действительно нет:
-            # иначе потеря локальной БД может дать дубль.
             chat_state: dict = {}
 
             def on_chat_api(resp) -> None:
                 try:
-                    url = resp.url or ""
-                    method = resp.request.method
-                    is_legacy = method == "GET" and _CHATS_ORDER_PATH in url
-                    is_personal = (
-                        method == "GET"
-                        and _WS_CHATS_PERSONAL in url
-                        and f"orderId={order_id}" in url
-                    )
-                    if not (is_legacy or is_personal):
+                    if not is_chat_state_url(resp.url or "", resp.request.method, order_id):
                         return
-                    if is_personal and resp.status == 204:
-                        chat_state["payload"] = {}  # пусто = чата с историей нет
+                    if resp.status == 204:
+                        chat_state["payload"] = {}
                         return
                     if resp.status != 200:
                         chat_state["error"] = f"HTTP {resp.status}"
@@ -99,9 +76,18 @@ class Responder:
                     if not isinstance(payload, dict):
                         chat_state["error"] = f"невалидный payload: {type(payload).__name__}"
                         return
-                    chat_state["payload"] = payload
+                    existing = chat_state.get("payload")
+                    if existing not in (None, {}) and existing != payload:
+                        chat_state["error"] = "несколько разных chat-state payload"
+                        return
+                    if payload:
+                        chat_state["payload"] = payload
+                    else:
+                        chat_state.setdefault("payload", {})
                 except Exception as e:
-                    chat_state["error"] = f"не удалось прочитать chat-state: {type(e).__name__}: {e}"
+                    chat_state["error"] = (
+                        f"не удалось прочитать chat-state: {type(e).__name__}: {e}"
+                    )
 
             url = config.chat_url(order_id, chat_title)
             page.on("response", on_chat_api)
@@ -118,15 +104,13 @@ class Responder:
                     raise RespondAuthError("вылогинен при ожидании композера") from e
                 raise RespondError(f"композер не появился: {e}") from e
 
-            # Явно ждём именно успешный ответ проверки существующего чата.
-            # Composer сам по себе не доказывает, что история уже загружена.
-            deadline = time.monotonic() + _CHAT_STATE_WAIT_S
+            deadline = time.monotonic() + config.CHAT_STATE_WAIT_S
             while not ({"payload", "error"} & chat_state.keys()) and time.monotonic() < deadline:
                 page.wait_for_timeout(100)
             if "error" in chat_state:
                 raise RespondError(f"состояние чата не подтверждено: {chat_state['error']}")
             if "payload" not in chat_state:
-                raise RespondError("не пойман /api/teacher/chats/order — состояние чата не подтверждено")
+                raise RespondError("chat-state response не пойман — состояние не подтверждено")
 
             if _chat_has_history(chat_state["payload"]):
                 return {
@@ -150,17 +134,14 @@ class Responder:
             type_human(page, composer, text)
             human_pause(0.4, 0.9)
 
-            # Финальная сверка поля: площадка могла порезать ввод. Обрезанный
-            # или изменённый текст не отправляем.
             value = (composer.input_value() or "").strip()
             if value != text.strip():
                 raise RespondError(f"в поле не наш текст: {value[:60]!r}")
             self._screenshot(page, order_id, "filled")
 
             send_btn.click()
+            clicked = True
 
-            # Успех подтверждаем двумя независимыми DOM-признаками из SPEC:
-            # сообщение появилось в чате И composer очистился. Иначе fail-closed.
             ok = False
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
@@ -179,8 +160,6 @@ class Responder:
                 log.info("отклик отправлен: заявка %s", order_id)
                 return {"status": "sent", "detail": "ок", "screenshot": shot}
 
-            # Send был, подтверждения нет: считаем возможной отправкой. Повторная
-            # попытка запрещена, дневной лимит расходуется.
             log.warning("заявка %s: нет полного DOM-подтверждения после Send — unknown", order_id)
             return {
                 "status": "unknown",
@@ -193,10 +172,10 @@ class Responder:
         except RespondError as e:
             shot = shot or self._try_screenshot(page, order_id)
             return {"status": "retry", "detail": str(e), "screenshot": shot}
-        except Exception as e:  # браузерные сбои не должны ронять процесс
+        except Exception as e:
             shot = shot or self._try_screenshot(page, order_id)
             return {
-                "status": "retry",
+                "status": "unknown" if clicked else "retry",
                 "detail": f"{type(e).__name__}: {e}",
                 "screenshot": shot,
             }
@@ -217,7 +196,4 @@ class Responder:
             return None
 
     def _try_screenshot(self, page: Page, order_id: int) -> str | None:
-        try:
-            return self._screenshot(page, order_id, "error")
-        except Exception:
-            return None
+        return self._screenshot(page, order_id, "error")
