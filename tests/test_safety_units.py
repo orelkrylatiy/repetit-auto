@@ -31,7 +31,9 @@ def test_chat_history_detection_is_fail_closed_on_real_history_shapes():
     assert _chat_has_history({"result": {"lastMessage": {"id": 1}}})
     assert _chat_has_history({"result": {"messages": [{"id": 1}]}})
     assert not _chat_has_history({"result": {"messages": []}})
-    assert not _chat_has_history(None)
+    # Unknown/non-dict state must block a first Send instead of being treated empty.
+    assert _chat_has_history(None)
+    assert _chat_has_history([])
 
 
 def test_textguard_blocks_common_contact_channels_and_phones():
