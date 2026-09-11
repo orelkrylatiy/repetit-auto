@@ -12,8 +12,6 @@ from collections.abc import Sequence
 from repetit import config
 from repetit.utils import textguard
 
-# Keep business copy outside the LLM prompt: these are deliberately generic,
-# truthful messages that are safe for the current informatics/programming offer.
 DEFAULT_TEMPLATES: tuple[str, ...] = (
     (
         "Здравствуйте! Могу помочь с информатикой и программированием. "
@@ -37,7 +35,7 @@ DEFAULT_TEMPLATES: tuple[str, ...] = (
 
 
 def choose_fallback(order_id: int | str, templates: Sequence[str]) -> str | None:
-    """Stable per-order template choice, mirroring profi-agent's safe fallback."""
+    """Stable per-order template choice, mirroring profi-agent's fallback."""
     clean = [str(t).strip() for t in templates if str(t).strip()]
     if not clean:
         return None
@@ -67,24 +65,27 @@ def fallback_reply(
 ) -> dict:
     """Return a triage-compatible fallback decision.
 
-    ``decision=error`` means fallback is unavailable/invalid; caller decides
-    whether the original LLM error should stay retryable.
+    Passing an explicit empty ``templates`` sequence is intentionally different
+    from ``None``: it means the caller has no fallback copy and must fail closed.
     """
     if not config.FALLBACK_ENABLED:
         return {
             "decision": "error",
-            "reason": f"{reason}; fallback выключен",
+            "reason": f"{reason}; fallback выключен"[:500],
             "text": "",
             "source": "fallback",
         }
-    selected = choose_fallback(
-        order_id,
-        templates or config.FALLBACK_TEMPLATES or DEFAULT_TEMPLATES,
-    )
+
+    available: Sequence[str]
+    if templates is None:
+        available = config.FALLBACK_TEMPLATES or DEFAULT_TEMPLATES
+    else:
+        available = templates
+    selected = choose_fallback(order_id, available)
     if not selected:
         return {
             "decision": "error",
-            "reason": f"{reason}; fallback-шаблоны пусты",
+            "reason": f"{reason}; fallback-шаблоны пусты"[:500],
             "text": "",
             "source": "fallback",
         }
@@ -92,13 +93,13 @@ def fallback_reply(
     if invalid:
         return {
             "decision": "error",
-            "reason": f"{reason}; fallback отклонён: {invalid}",
+            "reason": f"{reason}; fallback отклонён: {invalid}"[:500],
             "text": "",
             "source": "fallback",
         }
     return {
         "decision": "respond",
-        "reason": reason,
+        "reason": str(reason)[:500],
         "text": text,
         "source": "fallback",
     }
