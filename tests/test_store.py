@@ -99,5 +99,6 @@ def test_stats_group_decisions_and_count_confirmed_sent(tmp_path):
         assert stats["seen"] == 3
         assert stats["sent"] == 1
         assert stats["by_decision"] == {"filtered": 1, "respond": 1, "skip": 1}
+        assert stats["chat"] == {}
     finally:
         store.close()
